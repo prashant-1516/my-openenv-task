@@ -1,0 +1,116 @@
+name: icu-resource-allocation
+version: "1.0.0"
+description: >
+  A real-world OpenEnv environment modelling a 20-bed ICU in a 500-bed Indian
+  tertiary-care hospital.  An AI agent acts as the ICU charge coordinator,
+  making resource allocation decisions every 30 minutes over a 24-hour duty
+  cycle.  The agent must balance patient admissions, nurse staffing, equipment
+  utilisation and a daily operating budget to minimise preventable deaths and
+  adverse events while maintaining NABH-compliant care standards.
+
+author: "OpenEnv Hackathon Participant"
+license: MIT
+
+real_world_basis:
+  - "SOFA score (Sequential Organ Failure Assessment) — gold-standard ICU triage tool (Vincent et al., 1996)"
+  - "NABH nurse:patient ratio standard — 1:2 for ICU (National Accreditation Board for Hospitals, India)"
+  - "Bed turnover times from Agnihotri et al., Indian J Crit Care Med 2019"
+  - "Patient arrival peaks: Arias-Verdú et al., Critical Care Medicine 2017"
+  - "SOFA-to-mortality mapping: Ferreira et al., JAMA 2001"
+  - "Cost calibration: CGHS ICU package rates 2023 (Central Govt Health Scheme, India)"
+
+action_space:
+  type: Discrete
+  n: 7
+  labels:
+    0: "HOLD — observe, no allocation change"
+    1: "ADMIT_CRITICAL — admit highest-SOFA patient from queue"
+    2: "ADMIT_FIFO — admit longest-waiting patient"
+    3: "TRANSFER_OUT — move most stable patient to step-down unit"
+    4: "CALL_EXTRA_NURSE — overtime nurse this shift (₹1,200)"
+    5: "SPECIALIST_CONSULT — consult for sickest patient (₹3,500, -15% mortality risk)"
+    6: "EXPEDITE_BED — housekeeping overtime to clean bed faster (₹600)"
+
+observation_space:
+  type: Dict
+  n_fields: 27
+  fields:
+    beds_total:             { type: int,   value: 20,          description: "Total ICU beds" }
+    beds_occupied:          { type: int,   range: [0,20],      description: "Current patients in ICU" }
+    beds_available:         { type: int,   range: [0,20],      description: "Beds ready for admission" }
+    beds_in_turnover:       { type: int,   range: [0,20],      description: "Beds being cleaned/prepared" }
+    queue_total:            { type: int,   range: [0,50],      description: "Patients waiting for ICU admission" }
+    queue_critical:         { type: int,   range: [0,50],      description: "Waiting patients with SOFA ≥ 11" }
+    queue_severe:           { type: int,   range: [0,50],      description: "Waiting patients with SOFA 7-10" }
+    queue_moderate:         { type: int,   range: [0,50],      description: "Waiting patients with SOFA < 7" }
+    queue_max_wait_steps:   { type: int,   range: [0,48],      description: "Steps since oldest waiting patient arrived" }
+    avg_icu_sofa:           { type: float, range: [0.0,24.0],  description: "Mean SOFA of current ICU patients" }
+    avg_icu_mortality_risk: { type: float, range: [0.0,1.0],   description: "Mean mortality probability of ICU patients" }
+    ventilators_available:  { type: int,   range: [0,12],      description: "Ventilators free" }
+    ventilators_in_use:     { type: int,   range: [0,12],      description: "Ventilators in use" }
+    dialysis_available:     { type: int,   range: [0,4],       description: "Dialysis machines free" }
+    nurses_on_duty:         { type: int,   range: [8,20],      description: "Nurses currently on shift" }
+    nurse_patient_ratio:    { type: float, range: [0.0,5.0],   description: "Patients per nurse (NABH limit: 2.0)" }
+    doctors_on_duty:        { type: int,   value: 2,           description: "Intensivists on call" }
+    shift:                  { type: int,   range: [0,2],       description: "0=Day 1=Evening 2=Night" }
+    time_of_day:            { type: float, range: [0.0,24.0],  description: "Current hour" }
+    step:                   { type: int,   range: [0,48],      description: "Current step (each = 30 min)" }
+    budget_remaining_inr:   { type: float, range: [0,150000],  description: "Remaining daily budget in INR" }
+    budget_utilisation_pct: { type: float, range: [0,100],     description: "Percent of budget used" }
+    admissions_today:       { type: int,   range: [0,50],      description: "ICU admissions this episode" }
+    transfers_today:        { type: int,   range: [0,20],      description: "Step-down transfers this episode" }
+    deaths_in_queue:        { type: int,   range: [0,20],      description: "Preventable deaths (patient died waiting)" }
+    adverse_events:         { type: int,   range: [0,50],      description: "Adverse events in ICU (understaffing-related)" }
+    wait_violations:        { type: int,   range: [0,100],     description: "Critical patient wait-time breaches" }
+
+episode:
+  max_steps: 48
+  step_duration_minutes: 30
+  description: "One 24-hour ICU duty cycle starting at 08:00"
+
+reward:
+  range: [-8.0, 3.0]
+  partial_signals: true
+  description: >
+    Multi-objective reward emitted at every step.
+    Includes: nurse-ratio score (+1.0), critical wait penalty (-1.5/violation),
+    missed-admission penalty (-0.5), budget conservation (+0.2), throughput (+0.5),
+    equipment saturation penalty (-0.4).
+
+tasks:
+  - id: task_easy
+    name: "Prevent Preventable Deaths"
+    description: >
+      Run a 24-hour shift with zero queue deaths and nurse:patient ratio breaches
+      in fewer than 10% of steps. Baseline safety standard.
+    difficulty: easy
+    grader: graders/task_graders.py::grade_task_easy
+
+  - id: task_medium
+    name: "NABH-Compliant Critical Care"
+    description: >
+      Zero queue deaths + safe nurse ratio + all critical patients (SOFA ≥ 11)
+      admitted within 2 hours of arrival. Maps to NABH Grade-B ICU standard.
+    difficulty: medium
+    grader: graders/task_graders.py::grade_task_medium
+
+  - id: task_hard
+    name: "JCI-Grade ICU Excellence"
+    description: >
+      All medium criteria + zero adverse events + budget utilisation ≤ 85% +
+      average patient SOFA non-increasing over the shift. Matches JCI / NABH
+      Grade-A quality improvement benchmarks.
+    difficulty: hard
+    grader: graders/task_graders.py::grade_task_hard
+
+env_vars:
+  API_BASE_URL: { description: "LLM API endpoint", required: true }
+  MODEL_NAME:   { description: "Model identifier for inference", required: true }
+  HF_TOKEN:     { description: "HuggingFace API key", required: true }
+
+infra:
+  runtime_limit_minutes: 20
+  vcpu: 2
+  memory_gb: 8
+  hf_space: true
+  inference_script: inference.py
