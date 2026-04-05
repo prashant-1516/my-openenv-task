@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "icu-resource-allocation"
+version = "1.0.0"
+description = "ICU Resource Allocation OpenEnv"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn==0.30.6",
+    "pydantic==2.9.0",
+    "openai==1.51.0",
+    "pyyaml==6.0.2",
+    "requests==2.32.3",
+]
+
+[tool.openenv]
+name = "icu-resource-allocation"
+version = "1.0.0"
+entry_point = "app:app"
