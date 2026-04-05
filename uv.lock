@@ -1,0 +1,16 @@
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "icu-resource-allocation"
+version = "1.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+    { name = "pydantic" },
+    { name = "openai" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "openenv-core" },
+]
