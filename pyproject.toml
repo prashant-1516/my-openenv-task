@@ -5,7 +5,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "icu-resource-allocation"
 version = "1.0.0"
-description = "ICU Resource Allocation OpenEnv"
+description = "ICU Resource Allocation OpenEnv - Real-world hospital ICU agent"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.115.0",
@@ -14,9 +14,17 @@ dependencies = [
     "openai==1.51.0",
     "pyyaml==6.0.2",
     "requests==2.32.3",
+    "openenv-core>=0.2.0",
 ]
+
+[project.scripts]
+server = "app:app"
 
 [tool.openenv]
 name = "icu-resource-allocation"
 version = "1.0.0"
 entry_point = "app:app"
+server_entry_point = "app:app"
+
+[tool.uv]
+dev-dependencies = []
