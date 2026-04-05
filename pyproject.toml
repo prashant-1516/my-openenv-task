@@ -18,13 +18,13 @@ dependencies = [
 ]
 
 [project.scripts]
-server = "app:app"
+server = "server.app:main"
 
 [tool.openenv]
 name = "icu-resource-allocation"
 version = "1.0.0"
-entry_point = "app:app"
-server_entry_point = "app:app"
+entry_point = "server.app:main"
+server_entry_point = "server.app:main"
 
 [tool.uv]
 dev-dependencies = []
