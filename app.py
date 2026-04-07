@@ -56,7 +56,7 @@ def root():
 @app.post("/reset", summary="Reset environment")
 def reset(req: ResetRequest = ResetRequest()):
     global _env
-    _env = ICUEnv(seed=req.seed)
+    _env = ICUEnv(seed=req.seed if req.seed is not None else 42)
     obs = _env.reset()
     return obs
 
