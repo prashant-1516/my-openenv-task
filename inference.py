@@ -6,7 +6,7 @@
 #   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
 #   [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
 #
-# Required env vars: API_BASE_URL, MODEL_NAME, HF_TOKEN
+# Required env vars: API_BASE_URL, API_KEY, MODEL_NAME
 # Uses OpenAI client for all LLM calls (required by hackathon rules).
 
 import os
@@ -16,9 +16,9 @@ import requests
 from openai import OpenAI
 
 # ── Config (from environment) ──────────────────────────────────────────────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
+API_BASE_URL = os.environ["API_BASE_URL"]
+API_KEY      = os.environ["API_KEY"]
+MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -294,13 +294,8 @@ def main():
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
     # Use OpenAI client (mandatory per hackathon rules)
-    client = None
-    try:
-        token  = HF_TOKEN if HF_TOKEN else "dummy"
-        client = OpenAI(base_url=API_BASE_URL, api_key=token)
-        print("[DEBUG] OpenAI client ready (model=" + MODEL_NAME + ")", flush=True)
-    except Exception as e:
-        print("[DEBUG] OpenAI client failed: " + str(e) + " - using fallback", flush=True)
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+print("[DEBUG] OpenAI client initialized via platform proxy", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         try:
