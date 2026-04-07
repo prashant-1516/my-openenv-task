@@ -677,4 +677,4 @@ if __name__ == "__main__":
               f"| {info['action_result'][:50]}")
 
     print(f"\nTotal reward so far: {total_reward:.3f}")
-    print("State OK:", len(env.state()) == 23)
+    print("State OK:", len(env.state()) == 27)
