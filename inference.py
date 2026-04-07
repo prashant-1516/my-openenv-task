@@ -21,6 +21,7 @@ from typing import List, Optional
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
 HF_TOKEN     = os.getenv("HF_TOKEN",     "")
+API_KEY      = os.getenv("API_KEY",      HF_TOKEN)
 
 # The running server (same container)
 ENV_BASE_URL      = "http://localhost:7860"
@@ -299,7 +300,8 @@ def main():
         from openai import OpenAI
         client = OpenAI(
             base_url=API_BASE_URL,
-            api_key=HF_TOKEN if HF_TOKEN else "dummy",
+            api_key=API_KEY if API_KEY else "dummy",
+        )
         )
     except Exception as e:
         print(f"[DEBUG] OpenAI client failed: {e}, using fallback only", flush=True)
