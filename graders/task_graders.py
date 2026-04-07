@@ -1,16 +1,8 @@
 """
 Graders for ICU Resource Allocation OpenEnv.
-Each grader runs a full 48-step episode and returns a score in [0.0, 1.0].
+Each grader runs a full 48-step episode and returns a score in (0.0, 1.0) EXCLUSIVE.
 
-Clinical rationale for thresholds
------------------------------------
-Easy   – Zero preventable queue deaths AND no major nurse-ratio breaches.
-         This is the baseline any functional ICU must meet.
-Medium – Zero deaths + safe ratios + ≥70% of critical patients admitted
-         within the 2-hour (4-step) window. Maps to NABH Grade-B compliance.
-Hard   – All of Medium + budget utilisation ≤ 85% + adverse events = 0 +
-         average ICU SOFA trend non-increasing (quality improvement metric).
-         Maps to NABH Grade-A / JCI accreditation targets.
+IMPORTANT: scores must be STRICTLY between 0 and 1 — not 0.0, not 1.0.
 """
 
 import sys
@@ -20,14 +12,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from env import ICUEnv
 
 
+# Strictly clamp: ensures score is NEVER exactly 0.0 or 1.0
+_SCORE_MIN = 0.001
+_SCORE_MAX = 0.999
+
+
+def _strict(score: float) -> float:
+    """Clamp score to be strictly between 0 and 1 (exclusive), rounded to 4dp."""
+    return round(min(_SCORE_MAX, max(_SCORE_MIN, float(score))), 4)
+
+
 def _run_episode(agent_fn, seed: int = 42) -> dict:
     """Run a full episode and collect all outcome metrics."""
     env = ICUEnv(seed=seed)
     obs = env.reset()
 
-    # Tracking
     nurse_ratio_steps   = []
-    critical_wait_steps = []   # (patient_id, wait_steps) for critical patients admitted
     sofa_trajectory     = []
     budget_used_pcts    = []
     total_reward        = 0.0
@@ -44,10 +44,9 @@ def _run_episode(agent_fn, seed: int = 42) -> dict:
         budget_used_pcts.append(obs["budget_utilisation_pct"])
         step_infos.append(info)
 
-    # Compute derived metrics
     avg_nurse_ratio        = sum(nurse_ratio_steps) / len(nurse_ratio_steps)
     ratio_breach_fraction  = sum(1 for r in nurse_ratio_steps if r > 2.0) / len(nurse_ratio_steps)
-    sofa_trend             = sofa_trajectory[-1] - sofa_trajectory[0]  # negative = improving
+    sofa_trend             = sofa_trajectory[-1] - sofa_trajectory[0]
     final_budget_used      = obs["budget_utilisation_pct"] / 100.0
 
     return {
@@ -65,60 +64,55 @@ def _run_episode(agent_fn, seed: int = 42) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Task 1 — EASY: Prevent queue deaths & maintain nurse ratio
+# Task 1 — EASY
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grade_task_easy(agent_fn, seed: int = 42) -> float:
     """
-    Score 1.0 if: deaths_in_queue == 0 AND nurse_ratio_breach < 10% of steps.
-    Partial credit otherwise.
+    Score strictly in (0, 1).
+    Higher score for: zero deaths AND low nurse-ratio breach fraction.
+    Uses linear scaling to guarantee strict (0, 1) exclusivity.
     """
     m = _run_episode(agent_fn, seed)
 
-    # Death penalty: each death removes 0.25 from score, floor at 0
-    death_penalty = min(1.0, m["deaths_in_queue"] * 0.25)
+    death_penalty = min(0.999, m["deaths_in_queue"] * 0.25)
+    ratio_score   = 1.0 - m["ratio_breach_fraction"]
 
-    # Nurse ratio: score based on fraction of steps within safe range
-    ratio_score = 1.0 - m["ratio_breach_fraction"]
-
-    # Combine: 60% deaths (primary safety), 40% nurse ratio
-    raw = 0.60 * (1.0 - death_penalty) + 0.40 * ratio_score
-    return round(min(1.0, max(0.0, raw)), 4)
+    raw    = 0.60 * (1.0 - death_penalty) + 0.40 * ratio_score
+    # Map [0,1] -> (0.04, 0.96) so perfect and worst scores are never 0 or 1
+    scaled = raw * 0.92 + 0.04
+    return _strict(scaled)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Task 2 — MEDIUM: Add critical-patient response time compliance
+# Task 2 — MEDIUM
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grade_task_medium(agent_fn, seed: int = 42) -> float:
     """
-    Score 1.0 if:
-      - deaths_in_queue == 0
-      - ratio_breach_fraction < 10%
-      - wait_violations == 0 (no critical patient waited > 2 hours)
+    Score strictly in (0, 1).
+    Higher for: zero deaths + safe ratios + zero wait violations.
     """
     m = _run_episode(agent_fn, seed)
 
-    death_score  = max(0.0, 1.0 - m["deaths_in_queue"] * 0.30)
-    ratio_score  = 1.0 - m["ratio_breach_fraction"]
-    wait_score   = max(0.0, 1.0 - m["wait_violations"] * 0.15)
+    death_score = max(0.0, 1.0 - m["deaths_in_queue"] * 0.30)
+    ratio_score = 1.0 - m["ratio_breach_fraction"]
+    wait_score  = max(0.0, 1.0 - m["wait_violations"] * 0.15)
 
-    raw = 0.40 * death_score + 0.30 * ratio_score + 0.30 * wait_score
-    return round(min(1.0, max(0.0, raw)), 4)
+    raw    = 0.40 * death_score + 0.30 * ratio_score + 0.30 * wait_score
+    scaled = raw * 0.92 + 0.04
+    return _strict(scaled)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Task 3 — HARD: Full quality + budget + no adverse events
+# Task 3 — HARD
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grade_task_hard(agent_fn, seed: int = 42) -> float:
     """
-    Score 1.0 if all of:
-      - deaths_in_queue == 0
-      - adverse_events == 0
-      - wait_violations == 0
-      - budget_used <= 85%
-      - SOFA trend <= 0 (average patient acuity non-increasing)
+    Score strictly in (0, 1).
+    Higher for: zero deaths, zero adverse events, zero wait violations,
+    budget <= 85%, SOFA trend <= 0.
     """
     m = _run_episode(agent_fn, seed)
 
@@ -126,16 +120,15 @@ def grade_task_hard(agent_fn, seed: int = 42) -> float:
     adverse_score = max(0.0, 1.0 - m["adverse_events"] * 0.10)
     wait_score    = max(0.0, 1.0 - m["wait_violations"] * 0.12)
 
-    # Budget: full marks if ≤ 85%, linear penalty above
     bu = m["final_budget_used_pct"]
     budget_score = 1.0 if bu <= 0.85 else max(0.0, 1.0 - (bu - 0.85) * 4)
 
-    # SOFA trend: reward decreasing (improving) acuity
     sofa_score = 1.0 if m["sofa_trend"] <= 0 else max(0.0, 1.0 - m["sofa_trend"] / 5.0)
 
-    raw = (0.30 * death_score + 0.20 * adverse_score + 0.20 * wait_score
-           + 0.15 * budget_score + 0.15 * sofa_score)
-    return round(min(1.0, max(0.0, raw)), 4)
+    raw    = (0.30 * death_score + 0.20 * adverse_score + 0.20 * wait_score
+              + 0.15 * budget_score + 0.15 * sofa_score)
+    scaled = raw * 0.92 + 0.04
+    return _strict(scaled)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,33 +144,22 @@ def _make_random_agent(seed: int = 7):
 
 
 def _make_rule_based_agent():
-    """
-    Clinically-grounded rule-based agent.
-    Priority: admit critical → maintain ratio → transfer stable → hold.
-    """
+    """Clinically-grounded rule-based agent."""
     def agent(obs):
-        beds_free   = obs["beds_available"]
-        q_critical  = obs["queue_critical"]
-        q_total     = obs["queue_total"]
-        ratio       = obs["nurse_patient_ratio"]
-        occupied    = obs["beds_occupied"]
+        beds_free  = obs["beds_available"]
+        q_critical = obs["queue_critical"]
+        q_total    = obs["queue_total"]
+        ratio      = obs["nurse_patient_ratio"]
+        occupied   = obs["beds_occupied"]
 
-        # Immediate: admit critical patient if bed free
         if q_critical > 0 and beds_free > 0:
             return 1   # ADMIT_CRITICAL
-
-        # Nurse ratio unsafe: call extra nurse if occupied > 12
         if ratio > 2.2 and occupied > 12:
             return 4   # CALL_EXTRA_NURSE
-
-        # Free up a bed if queue non-empty and no beds free
         if q_total > 0 and beds_free == 0:
             return 3   # TRANSFER_OUT
-
-        # Admit next in queue if bed free
         if q_total > 0 and beds_free > 0:
             return 2   # ADMIT_FIFO
-
         return 0   # HOLD
     return agent
 
@@ -198,9 +180,9 @@ if __name__ == "__main__":
         e = grade_task_easy(agent)
         m = grade_task_medium(agent)
         h = grade_task_hard(agent)
-        in_range = all(0.0 <= s <= 1.0 for s in [e, m, h])
+        strictly_ok = all(0.0 < s < 1.0 for s in [e, m, h])
         print(f"\n{label}:")
         print(f"  Easy   (prevent deaths + safe ratio):     {e:.4f}")
         print(f"  Medium (+ critical response time):        {m:.4f}")
         print(f"  Hard   (+ budget + adverse events + SOFA):{h:.4f}")
-        print(f"  All scores in [0.0, 1.0]: {in_range}")
+        print(f"  All scores strictly in (0.0, 1.0): {strictly_ok}")
