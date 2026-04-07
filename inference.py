@@ -1,22 +1,24 @@
 # -*- coding: utf-8 -*-
 # inference.py - ICU Resource Allocation OpenEnv
-# Calls the running FastAPI server at localhost:7860 via HTTP.
 #
-# Required stdout format:
+# Mandatory stdout format (do NOT deviate from this):
 #   [START] task=<task_name> env=<benchmark> model=<model_name>
 #   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
 #   [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
+#
+# Required env vars: API_BASE_URL, MODEL_NAME, HF_TOKEN
+# Uses OpenAI client for all LLM calls (required by hackathon rules).
 
 import os
 import sys
 import time
 import requests
-from typing import List, Optional
+from openai import OpenAI
 
-# Config
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN",     "")
+# ── Config (from environment) ──────────────────────────────────────────────────
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+MODEL_NAME   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
+HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -47,7 +49,7 @@ SYSTEM_PROMPT = (
 )
 
 
-# Stdout log helpers
+# ── Stdout log helpers ─────────────────────────────────────────────────────────
 
 def log_start(task, env_name, model):
     print("[START] task=" + task + " env=" + env_name + " model=" + model, flush=True)
@@ -67,8 +69,8 @@ def log_step(step, action, reward, done, error):
 
 
 def log_end(success, steps, score, rewards):
-    success_str  = "true" if success else "false"
-    rewards_str  = ",".join("{:.2f}".format(r) for r in rewards)
+    success_str = "true" if success else "false"
+    rewards_str = ",".join("{:.2f}".format(r) for r in rewards)
     print(
         "[END] success=" + success_str +
         " steps=" + str(steps) +
@@ -78,7 +80,7 @@ def log_end(success, steps, score, rewards):
     )
 
 
-# HTTP helpers
+# ── HTTP helpers ───────────────────────────────────────────────────────────────
 
 def _wait_for_server(max_wait=60):
     for _ in range(max_wait):
@@ -125,7 +127,7 @@ def _step_env(action):
         return None
 
 
-# LLM prompt builder
+# ── LLM prompt builder ─────────────────────────────────────────────────────────
 
 def _obs_to_prompt(obs):
     shift_names = ["Day", "Evening", "Night"]
@@ -144,24 +146,25 @@ def _obs_to_prompt(obs):
     return "\n".join(lines)
 
 
-# Rule-based fallback agent
+# ── Rule-based fallback agent ──────────────────────────────────────────────────
 
 def _fallback(obs):
     try:
         if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
-            return 1
+            return 1  # ADMIT_CRITICAL
         if obs.get("nurse_patient_ratio", 1.0) > 2.2:
-            return 4
+            return 4  # CALL_EXTRA_NURSE
         if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
-            return 3
+            return 3  # TRANSFER_OUT
         if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
-            return 2
+            return 2  # ADMIT_FIFO
     except Exception:
         pass
-    return 0
+    return 0  # HOLD
 
 
 def _get_action(client, obs):
+    """Use OpenAI client (required) to query LLM; fall back to rule-based on error."""
     if client is None:
         return _fallback(obs), "no_llm_client"
     try:
@@ -184,28 +187,27 @@ def _get_action(client, obs):
         return _fallback(obs), "llm_err:" + type(e).__name__
 
 
-# Inline scoring
+# ── Inline scoring ─────────────────────────────────────────────────────────────
 
 def _score(task_id, m):
+    """Compute score strictly in (0, 1) — mirrors task_graders.py logic."""
     try:
         if task_id == "task_easy":
-            s = (
-                0.50 * max(0.0, 1.0 - m["deaths"] * 0.30) +
-                0.25 * max(0.0, 1.0 - m["ratio_breach_frac"] * 3.0) +
-                0.25 * min(1.0, m["admissions"] / 6.0)
-            )
+            death_penalty = min(0.999, m["deaths"] * 0.25)
+            ratio_score   = 1.0 - m["ratio_breach_frac"]
+            raw = 0.60 * (1.0 - death_penalty) + 0.40 * ratio_score
+
         elif task_id == "task_medium":
-            s = (
-                0.35 * max(0.0, 1.0 - m["deaths"] * 0.35) +
-                0.25 * max(0.0, 1.0 - m["ratio_breach_frac"] * 4.0) +
-                0.25 * max(0.0, 1.0 - m["wait_violations"] * 0.12) +
-                0.15 * min(1.0, m["admissions"] / 8.0)
-            )
+            death_score = max(0.0, 1.0 - m["deaths"] * 0.30)
+            ratio_score = 1.0 - m["ratio_breach_frac"]
+            wait_score  = max(0.0, 1.0 - m["wait_violations"] * 0.15)
+            raw = 0.40 * death_score + 0.30 * ratio_score + 0.30 * wait_score
+
         elif task_id == "task_hard":
             bu = m["budget_used_pct"]
             budget_s = 1.0 if bu <= 0.85 else max(0.0, 1.0 - (bu - 0.85) * 4)
             sofa_s   = 1.0 if m["sofa_trend"] <= 0 else max(0.0, 1.0 - m["sofa_trend"] / 5.0)
-            s = (
+            raw = (
                 0.30 * max(0.0, 1.0 - m["deaths"] * 0.35) +
                 0.20 * max(0.0, 1.0 - m["adverse"] * 0.10) +
                 0.20 * max(0.0, 1.0 - m["wait_violations"] * 0.12) +
@@ -213,22 +215,26 @@ def _score(task_id, m):
                 0.15 * sofa_s
             )
         else:
-            s = 0.0
-        return round(min(1.0, max(0.0, s)), 3)
+            raw = 0.0
+
+        # Map [0,1] -> (0.04, 0.96) — same as task_graders.py
+        scaled = raw * 0.92 + 0.04
+        return round(min(0.999, max(0.001, scaled)), 3)
+
     except Exception:
-        return 0.0
+        return 0.001
 
 
-# Episode runner
+# ── Episode runner ─────────────────────────────────────────────────────────────
 
 def run_task(task_id, client):
-    rewards         = []
-    ratio_breaches  = []
-    sofa_traj       = []
-    steps_taken     = 0
-    score           = 0.0
-    success         = False
-    obs             = {}
+    rewards        = []
+    ratio_breaches = []
+    sofa_traj      = []
+    steps_taken    = 0
+    score          = 0.001
+    success        = False
+    obs            = {}
 
     log_start(task=task_id, env_name=BENCHMARK, model=MODEL_NAME)
 
@@ -279,7 +285,7 @@ def run_task(task_id, client):
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-# Main
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     print("[DEBUG] Waiting for server...", flush=True)
@@ -287,12 +293,12 @@ def main():
     if not ready:
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
+    # Use OpenAI client (mandatory per hackathon rules)
     client = None
     try:
-        from openai import OpenAI
         token  = HF_TOKEN if HF_TOKEN else "dummy"
         client = OpenAI(base_url=API_BASE_URL, api_key=token)
-        print("[DEBUG] OpenAI client ready", flush=True)
+        print("[DEBUG] OpenAI client ready (model=" + MODEL_NAME + ")", flush=True)
     except Exception as e:
         print("[DEBUG] OpenAI client failed: " + str(e) + " - using fallback", flush=True)
 
@@ -301,7 +307,7 @@ def main():
             run_task(task_id, client)
         except Exception as e:
             print("[DEBUG] run_task crashed: " + str(e), flush=True)
-            print("[END] success=false steps=0 score=0.000 rewards=", flush=True)
+            print("[END] success=false steps=0 score=0.001 rewards=", flush=True)
 
 
 if __name__ == "__main__":
