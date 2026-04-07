@@ -155,7 +155,7 @@ class ICUEnv:
 
     def reset(self) -> dict:
         """Reset to beginning of a fresh 24-hour duty cycle."""
-        self._rng = random.Random(self.seed + self._step)
+        self._rng = random.Random(self.seed)
         self._step = 0
         self._pid_counter = 0
         self._hour = 8.0   # Duty cycle starts at 08:00
