@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 # inference.py - ICU Resource Allocation OpenEnv
 #
-# Mandatory stdout format (do NOT deviate from this):
+# Mandatory stdout format:
 #   [START] task=<task_name> env=<benchmark> model=<model_name>
 #   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
 #   [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
 #
-# Required env vars: API_BASE_URL, API_KEY, MODEL_NAME
-# Uses OpenAI client for all LLM calls (required by hackathon rules).
+# Required env vars (injected by hackathon platform):
+#   API_BASE_URL  — LiteLLM proxy endpoint
+#   API_KEY       — proxy key (do NOT use HF_TOKEN or own credentials)
+#   MODEL_NAME    — model identifier
 
 import os
 import sys
@@ -15,9 +17,9 @@ import time
 import requests
 from openai import OpenAI
 
-# ── Config (from environment) ──────────────────────────────────────────────────
-API_BASE_URL = os.environ["API_BASE_URL"]
-API_KEY      = os.environ["API_KEY"]
+# ── Config: read strictly from environment — NO hardcoded fallbacks ────────────
+API_BASE_URL = os.environ["API_BASE_URL"]   # must be set by platform
+API_KEY      = os.environ["API_KEY"]        # platform-injected proxy key
 MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
 ENV_BASE_URL      = "http://localhost:7860"
@@ -146,7 +148,7 @@ def _obs_to_prompt(obs):
     return "\n".join(lines)
 
 
-# ── Rule-based fallback agent ──────────────────────────────────────────────────
+# ── Rule-based fallback (only used if LLM returns unparseable output) ──────────
 
 def _fallback(obs):
     try:
@@ -164,9 +166,7 @@ def _fallback(obs):
 
 
 def _get_action(client, obs):
-    """Use OpenAI client (required) to query LLM; fall back to rule-based on error."""
-    if client is None:
-        return _fallback(obs), "no_llm_client"
+    """Always calls the LLM via platform proxy. Falls back on bad/unparseable output only."""
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -182,6 +182,7 @@ def _get_action(client, obs):
             a = int(raw[0])
             if 0 <= a <= 6:
                 return a, None
+        # LLM returned something unparseable — use rule-based but API was still called
         return _fallback(obs), "bad_output:" + raw[:10]
     except Exception as e:
         return _fallback(obs), "llm_err:" + type(e).__name__
@@ -217,7 +218,6 @@ def _score(task_id, m):
         else:
             raw = 0.0
 
-        # Map [0,1] -> (0.04, 0.96) — same as task_graders.py
         scaled = raw * 0.92 + 0.04
         return round(min(0.999, max(0.001, scaled)), 3)
 
@@ -288,14 +288,17 @@ def run_task(task_id, client):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    print("[DEBUG] Waiting for server...", flush=True)
+    print("[DEBUG] API_BASE_URL=" + API_BASE_URL, flush=True)
+    print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
+
+    print("[DEBUG] Waiting for env server...", flush=True)
     ready = _wait_for_server(max_wait=60)
     if not ready:
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Use OpenAI client (mandatory per hackathon rules)
+    # Initialize OpenAI client pointing strictly to platform proxy
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-print("[DEBUG] OpenAI client initialized via platform proxy", flush=True)
+    print("[DEBUG] OpenAI client initialized via platform proxy", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         try:
