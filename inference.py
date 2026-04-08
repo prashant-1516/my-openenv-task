@@ -242,24 +242,24 @@ def run_task(task_id, client):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    # Read env vars here (inside main) so import never crashes
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
 
     print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
+    print("[DEBUG] API_KEY_LEN=" + str(len(api_key)), flush=True)
     print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Initialize OpenAI client using platform-injected proxy vars
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     print("[DEBUG] OpenAI client ready", flush=True)
-    print("[DEBUG] Testing proxy connection...", flush=True)
+
+    # Test call — NOT in try/except so failure is visible in logs
     test_resp = client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Reply with the digit 1"}],
+        messages=[{"role": "user", "content": "Reply with digit 1"}],
         max_tokens=5,
         temperature=0.0,
     )
