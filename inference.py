@@ -5,11 +5,6 @@
 #   [START] task=<task_name> env=<benchmark> model=<model_name>
 #   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
 #   [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
-#
-# Required env vars (injected by hackathon platform):
-#   API_BASE_URL  — LiteLLM proxy endpoint
-#   API_KEY       — proxy key (do NOT use HF_TOKEN or own credentials)
-#   MODEL_NAME    — model identifier
 
 import os
 import sys
@@ -17,10 +12,8 @@ import time
 import requests
 from openai import OpenAI
 
-# ── Config: read from environment (injected by platform) ──────────────────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "")   # LiteLLM proxy endpoint
-API_KEY      = os.environ.get("API_KEY", "")        # platform proxy key
-MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+# Read at module level safely — actual values used inside main()
+MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -51,38 +44,32 @@ SYSTEM_PROMPT = (
 )
 
 
-# ── Stdout log helpers ─────────────────────────────────────────────────────────
+# ── Log helpers ────────────────────────────────────────────────────────────────
 
 def log_start(task, env_name, model):
     print("[START] task=" + task + " env=" + env_name + " model=" + model, flush=True)
 
-
 def log_step(step, action, reward, done, error):
-    done_str  = "true" if done else "false"
-    error_str = str(error) if error else "null"
     print(
         "[STEP] step=" + str(step) +
         " action=" + str(action) +
         " reward=" + "{:.2f}".format(reward) +
-        " done=" + done_str +
-        " error=" + error_str,
+        " done=" + ("true" if done else "false") +
+        " error=" + (str(error) if error else "null"),
         flush=True,
     )
-
 
 def log_end(success, steps, score, rewards):
-    success_str = "true" if success else "false"
-    rewards_str = ",".join("{:.2f}".format(r) for r in rewards)
     print(
-        "[END] success=" + success_str +
+        "[END] success=" + ("true" if success else "false") +
         " steps=" + str(steps) +
         " score=" + "{:.3f}".format(score) +
-        " rewards=" + rewards_str,
+        " rewards=" + ",".join("{:.2f}".format(r) for r in rewards),
         flush=True,
     )
 
 
-# ── HTTP helpers ───────────────────────────────────────────────────────────────
+# ── Env server helpers ─────────────────────────────────────────────────────────
 
 def _wait_for_server(max_wait=60):
     for _ in range(max_wait):
@@ -95,41 +82,27 @@ def _wait_for_server(max_wait=60):
         time.sleep(1)
     return False
 
-
 def _reset_env(seed=42):
     try:
-        r = requests.post(
-            ENV_BASE_URL + "/reset",
-            json={"seed": seed},
-            timeout=REQUEST_TIMEOUT,
-        )
+        r = requests.post(ENV_BASE_URL + "/reset", json={"seed": seed}, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception as e:
         print("[DEBUG] reset failed: " + str(e), flush=True)
         return {}
 
-
 def _step_env(action):
     try:
-        r = requests.post(
-            ENV_BASE_URL + "/step",
-            json={"action": action},
-            timeout=REQUEST_TIMEOUT,
-        )
+        r = requests.post(ENV_BASE_URL + "/step", json={"action": action}, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
-        data   = r.json()
-        obs    = data["observation"]
-        reward = float(data["reward"])
-        done   = bool(data["done"])
-        info   = data.get("info", {})
-        return obs, reward, done, info
+        data = r.json()
+        return data["observation"], float(data["reward"]), bool(data["done"]), data.get("info", {})
     except Exception as e:
         print("[DEBUG] step failed: " + str(e), flush=True)
         return None
 
 
-# ── LLM prompt builder ─────────────────────────────────────────────────────────
+# ── LLM helpers ────────────────────────────────────────────────────────────────
 
 def _obs_to_prompt(obs):
     shift_names = ["Day", "Evening", "Night"]
@@ -147,26 +120,18 @@ def _obs_to_prompt(obs):
     ]
     return "\n".join(lines)
 
-
-# ── Rule-based fallback (only used if LLM returns unparseable output) ──────────
-
 def _fallback(obs):
-    try:
-        if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
-            return 1  # ADMIT_CRITICAL
-        if obs.get("nurse_patient_ratio", 1.0) > 2.2:
-            return 4  # CALL_EXTRA_NURSE
-        if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
-            return 3  # TRANSFER_OUT
-        if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
-            return 2  # ADMIT_FIFO
-    except Exception:
-        pass
-    return 0  # HOLD
-
+    if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
+        return 1
+    if obs.get("nurse_patient_ratio", 1.0) > 2.2:
+        return 4
+    if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
+        return 3
+    if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
+        return 2
+    return 0
 
 def _get_action(client, obs):
-    """Always calls the LLM via platform proxy. Falls back on bad/unparseable output only."""
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -182,45 +147,35 @@ def _get_action(client, obs):
             a = int(raw[0])
             if 0 <= a <= 6:
                 return a, None
-        # LLM returned something unparseable — use rule-based but API was still called
         return _fallback(obs), "bad_output:" + raw[:10]
     except Exception as e:
         return _fallback(obs), "llm_err:" + type(e).__name__
 
 
-# ── Inline scoring ─────────────────────────────────────────────────────────────
+# ── Scoring ────────────────────────────────────────────────────────────────────
 
 def _score(task_id, m):
-    """Compute score strictly in (0, 1) — mirrors task_graders.py logic."""
     try:
         if task_id == "task_easy":
             death_penalty = min(0.999, m["deaths"] * 0.25)
             ratio_score   = 1.0 - m["ratio_breach_frac"]
             raw = 0.60 * (1.0 - death_penalty) + 0.40 * ratio_score
-
         elif task_id == "task_medium":
-            death_score = max(0.0, 1.0 - m["deaths"] * 0.30)
-            ratio_score = 1.0 - m["ratio_breach_frac"]
-            wait_score  = max(0.0, 1.0 - m["wait_violations"] * 0.15)
-            raw = 0.40 * death_score + 0.30 * ratio_score + 0.30 * wait_score
-
+            raw = (0.40 * max(0.0, 1.0 - m["deaths"] * 0.30) +
+                   0.30 * (1.0 - m["ratio_breach_frac"]) +
+                   0.30 * max(0.0, 1.0 - m["wait_violations"] * 0.15))
         elif task_id == "task_hard":
             bu = m["budget_used_pct"]
             budget_s = 1.0 if bu <= 0.85 else max(0.0, 1.0 - (bu - 0.85) * 4)
             sofa_s   = 1.0 if m["sofa_trend"] <= 0 else max(0.0, 1.0 - m["sofa_trend"] / 5.0)
-            raw = (
-                0.30 * max(0.0, 1.0 - m["deaths"] * 0.35) +
-                0.20 * max(0.0, 1.0 - m["adverse"] * 0.10) +
-                0.20 * max(0.0, 1.0 - m["wait_violations"] * 0.12) +
-                0.15 * budget_s +
-                0.15 * sofa_s
-            )
+            raw = (0.30 * max(0.0, 1.0 - m["deaths"] * 0.35) +
+                   0.20 * max(0.0, 1.0 - m["adverse"] * 0.10) +
+                   0.20 * max(0.0, 1.0 - m["wait_violations"] * 0.12) +
+                   0.15 * budget_s + 0.15 * sofa_s)
         else:
             raw = 0.0
-
         scaled = raw * 0.92 + 0.04
         return round(min(0.999, max(0.001, scaled)), 3)
-
     except Exception:
         return 0.001
 
@@ -228,18 +183,18 @@ def _score(task_id, m):
 # ── Episode runner ─────────────────────────────────────────────────────────────
 
 def run_task(task_id, client):
-    rewards        = []
+    rewards = []
     ratio_breaches = []
-    sofa_traj      = []
-    steps_taken    = 0
-    score          = 0.001
-    success        = False
-    obs            = {}
+    sofa_traj = []
+    steps_taken = 0
+    score = 0.001
+    success = False
+    obs = {}
 
     log_start(task=task_id, env_name=BENCHMARK, model=MODEL_NAME)
 
     try:
-        obs  = _reset_env(seed=42)
+        obs = _reset_env(seed=42)
         done = False
 
         for step_n in range(1, MAX_STEPS + 1):
@@ -267,10 +222,9 @@ def run_task(task_id, client):
             n = max(1, len(ratio_breaches))
             sofa_trend = (sofa_traj[-1] - sofa_traj[0]) if len(sofa_traj) >= 2 else 0.0
             metrics = {
-                "deaths":            int(obs.get("deaths_in_queue",    0)),
-                "adverse":           int(obs.get("adverse_events",     0)),
-                "wait_violations":   int(obs.get("wait_violations",    0)),
-                "admissions":        int(obs.get("admissions_today",   0)),
+                "deaths":            int(obs.get("deaths_in_queue", 0)),
+                "adverse":           int(obs.get("adverse_events", 0)),
+                "wait_violations":   int(obs.get("wait_violations", 0)),
                 "ratio_breach_frac": sum(ratio_breaches) / n,
                 "budget_used_pct":   float(obs.get("budget_utilisation_pct", 0)) / 100.0,
                 "sofa_trend":        sofa_trend,
@@ -288,27 +242,28 @@ def run_task(task_id, client):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    print("[DEBUG] API_BASE_URL=" + API_BASE_URL, flush=True)
+    # Read env vars here (inside main) so import never crashes
+    api_base_url = os.environ["API_BASE_URL"]
+    api_key      = os.environ["API_KEY"]
+
+    print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
     print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
-    ready = _wait_for_server(max_wait=60)
-    if not ready:
+    if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Initialize OpenAI client pointing to platform proxy
-    # Use API_KEY; fall back to "dummy" only if platform did not inject it
-    api_key_val  = API_KEY      if API_KEY      else "dummy"
-    base_url_val = API_BASE_URL if API_BASE_URL else "https://api-inference.huggingface.co/v1"
-    client = OpenAI(base_url=base_url_val, api_key=api_key_val)
-    print("[DEBUG] OpenAI client initialized, base_url=" + base_url_val, flush=True)
+    # Initialize OpenAI client using platform-injected proxy vars
+    client = OpenAI(base_url=api_base_url, api_key=api_key)
+    print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         try:
             run_task(task_id, client)
         except Exception as e:
             print("[DEBUG] run_task crashed: " + str(e), flush=True)
-            print("[END] success=false steps=0 score=0.001 rewards=", flush=True)
+            log_start(task_id, BENCHMARK, MODEL_NAME)
+            log_end(success=False, steps=0, score=0.001, rewards=[])
 
 
 if __name__ == "__main__":
@@ -317,7 +272,7 @@ if __name__ == "__main__":
     except Exception as e:
         print("[DEBUG] main crashed: " + str(e), flush=True)
         for task_id in ["task_easy", "task_medium", "task_hard"]:
-            print("[START] task=" + task_id + " env=icu-resource-allocation model=" + MODEL_NAME, flush=True)
-            print("[END] success=false steps=0 score=0.001 rewards=", flush=True)
+            log_start(task_id, BENCHMARK, MODEL_NAME)
+            log_end(success=False, steps=0, score=0.001, rewards=[])
     finally:
         sys.exit(0)
