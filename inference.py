@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
 # inference.py - ICU Resource Allocation OpenEnv
-#
-# Mandatory stdout format:
-#   [START] task=<task_name> env=<benchmark> model=<model_name>
-#   [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-#   [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
 
 import os
 import sys
@@ -12,7 +7,6 @@ import time
 import requests
 from openai import OpenAI
 
-# Read at module level safely — actual values used inside main()
 MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
 ENV_BASE_URL      = "http://localhost:7860"
@@ -44,8 +38,6 @@ SYSTEM_PROMPT = (
 )
 
 
-# ── Log helpers ────────────────────────────────────────────────────────────────
-
 def log_start(task, env_name, model):
     print("[START] task=" + task + " env=" + env_name + " model=" + model, flush=True)
 
@@ -68,8 +60,6 @@ def log_end(success, steps, score, rewards):
         flush=True,
     )
 
-
-# ── Env server helpers ─────────────────────────────────────────────────────────
 
 def _wait_for_server(max_wait=60):
     for _ in range(max_wait):
@@ -102,8 +92,6 @@ def _step_env(action):
         return None
 
 
-# ── LLM helpers ────────────────────────────────────────────────────────────────
-
 def _obs_to_prompt(obs):
     shift_names = ["Day", "Evening", "Night"]
     shift = shift_names[int(obs.get("shift", 0))]
@@ -132,27 +120,24 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": _obs_to_prompt(obs)},
-            ],
-            max_tokens=5,
-            temperature=0.0,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        if raw and raw[0].isdigit():
-            a = int(raw[0])
-            if 0 <= a <= 6:
-                return a, None
-        return _fallback(obs), "bad_output:" + raw[:10]
-    except Exception as e:
-        return _fallback(obs), "llm_err:" + type(e).__name__
+    # No try/except — let failures be visible
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _obs_to_prompt(obs)},
+        ],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    print("[DEBUG] LLM raw=" + raw, flush=True)
+    if raw and raw[0].isdigit():
+        a = int(raw[0])
+        if 0 <= a <= 6:
+            return a
+    return _fallback(obs)
 
-
-# ── Scoring ────────────────────────────────────────────────────────────────────
 
 def _score(task_id, m):
     try:
@@ -180,8 +165,6 @@ def _score(task_id, m):
         return 0.001
 
 
-# ── Episode runner ─────────────────────────────────────────────────────────────
-
 def run_task(task_id, client):
     rewards = []
     ratio_breaches = []
@@ -201,7 +184,7 @@ def run_task(task_id, client):
             if done:
                 break
 
-            action_int, llm_error = _get_action(client, obs)
+            action_int = _get_action(client, obs)
             action_str = ACTION_NAMES.get(action_int, str(action_int))
 
             result = _step_env(action_int)
@@ -216,7 +199,7 @@ def run_task(task_id, client):
             sofa_traj.append(float(obs.get("avg_icu_sofa", 0.0)))
             steps_taken = step_n
 
-            log_step(step_n, action_str, reward, done, llm_error)
+            log_step(step_n, action_str, reward, done, None)
 
         if steps_taken > 0:
             n = max(1, len(ratio_breaches))
@@ -233,17 +216,22 @@ def run_task(task_id, client):
             success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        print("[DEBUG] task=" + task_id + " exception: " + str(e), flush=True)
+        print("[DEBUG] task=" + task_id + " CRASHED: " + str(e), flush=True)
+        import traceback
+        traceback.print_exc()
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 def main():
+    # Read platform-injected vars
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
+
+    # Ensure URL ends with /v1
+    if not api_base_url.rstrip("/").endswith("/v1"):
+        api_base_url = api_base_url.rstrip("/") + "/v1"
 
     print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
     print("[DEBUG] API_KEY_LEN=" + str(len(api_key)), flush=True)
@@ -256,29 +244,17 @@ def main():
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     print("[DEBUG] OpenAI client ready", flush=True)
 
-    # Test call — NOT in try/except so failure is visible in logs
-    test_resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Reply with digit 1"}],
-        max_tokens=5,
-        temperature=0.0,
-    )
-    print("[DEBUG] Proxy test OK: " + str(test_resp.choices[0].message.content), flush=True)
-
     for task_id in ["task_easy", "task_medium", "task_hard"]:
-        try:
-            run_task(task_id, client)
-        except Exception as e:
-            print("[DEBUG] run_task crashed: " + str(e), flush=True)
-            log_start(task_id, BENCHMARK, MODEL_NAME)
-            log_end(success=False, steps=0, score=0.001, rewards=[])
+        run_task(task_id, client)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print("[DEBUG] main crashed: " + str(e), flush=True)
+        print("[DEBUG] FATAL: " + str(e), flush=True)
+        import traceback
+        traceback.print_exc()
         for task_id in ["task_easy", "task_medium", "task_hard"]:
             log_start(task_id, BENCHMARK, MODEL_NAME)
             log_end(success=False, steps=0, score=0.001, rewards=[])
