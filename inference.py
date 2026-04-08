@@ -256,6 +256,14 @@ def main():
     # Initialize OpenAI client using platform-injected proxy vars
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     print("[DEBUG] OpenAI client ready", flush=True)
+    print("[DEBUG] Testing proxy connection...", flush=True)
+    test_resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Reply with the digit 1"}],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    print("[DEBUG] Proxy test OK: " + str(test_resp.choices[0].message.content), flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         try:
