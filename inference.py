@@ -7,7 +7,7 @@ import time
 import requests
 from openai import OpenAI
 
-MODEL_NAME = "gpt-4o-mini"
+MODEL_NAME = os.environ.get("MODEL_NAME")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
