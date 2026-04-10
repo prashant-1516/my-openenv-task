@@ -229,9 +229,8 @@ def main():
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
 
-    # Ensure URL ends with /v1
-    if not api_base_url.rstrip("/").endswith("/v1"):
-        api_base_url = api_base_url.rstrip("/") + "/v1"
+    print("BASE URL:", api_base_url)
+    print("MODEL:", MODEL_NAME)
 
     print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
     print("[DEBUG] API_KEY_LEN=" + str(len(api_key)), flush=True)
@@ -242,6 +241,19 @@ def main():
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
+
+    print("Testing API call...")
+
+    try:
+        test = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "Say 1"}],
+            max_tokens=5
+        )
+    print("Test response:", test.choices[0].message.content)
+    except Exception as e:
+        print("LLM ERROR:", e)
+    
     print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
