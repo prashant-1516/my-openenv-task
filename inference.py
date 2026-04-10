@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import requests
-from openai import OpenAI, APIError, APIConnectionError, RateLimitError
+from openai import OpenAI
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
@@ -120,7 +120,7 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    """Call LLM. Raise exception on failure so the error is visible."""
+    # No try/except — let failures be visible
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -136,25 +136,7 @@ def _get_action(client, obs):
         a = int(raw[0])
         if 0 <= a <= 6:
             return a
-    # Fallback only if LLM responded but gave unparseable output
     return _fallback(obs)
-
-
-def _test_llm_connection(client):
-    """Send a single test request to verify proxy connectivity."""
-    try:
-        print("[DEBUG] Testing LLM connection...", flush=True)
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Say 'ok'"}],
-            max_tokens=2,
-            temperature=0.0,
-        )
-        print("[DEBUG] Test LLM response: " + resp.choices[0].message.content, flush=True)
-        return True
-    except Exception as e:
-        print("[ERROR] LLM test call failed: " + str(e), flush=True)
-        return False
 
 
 def _score(task_id, m):
@@ -202,8 +184,6 @@ def run_task(task_id, client):
             if done:
                 break
 
-            # This will raise an exception if the LLM call fails,
-            # making the failure obvious.
             action_int = _get_action(client, obs)
             action_str = ACTION_NAMES.get(action_int, str(action_int))
 
@@ -236,7 +216,7 @@ def run_task(task_id, client):
             success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        print("[ERROR] task=" + task_id + " CRASHED: " + str(e), flush=True)
+        print("[DEBUG] task=" + task_id + " CRASHED: " + str(e), flush=True)
         import traceback
         traceback.print_exc()
 
@@ -261,14 +241,8 @@ def main():
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Create OpenAI client with explicit base_url and api_key
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     print("[DEBUG] OpenAI client ready", flush=True)
-
-    # 🔥 NEW: Test LLM connection before running tasks
-    if not _test_llm_connection(client):
-        print("[FATAL] LLM proxy unreachable – no API calls will be made.", flush=True)
-        sys.exit(1)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
