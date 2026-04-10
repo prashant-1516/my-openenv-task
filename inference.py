@@ -120,7 +120,6 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    # No try/except — let failures be visible
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -225,7 +224,6 @@ def run_task(task_id, client):
 
 
 def main():
-    # Read platform-injected vars
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
 
@@ -241,6 +239,7 @@ def main():
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
+    print("[DEBUG] OpenAI client ready", flush=True)
 
     print("Testing API call...")
 
@@ -250,11 +249,9 @@ def main():
             messages=[{"role": "user", "content": "Say 1"}],
             max_tokens=5
         )
-    print("Test response:", test.choices[0].message.content)
+        print("Test response:", test.choices[0].message.content)
     except Exception as e:
         print("LLM ERROR:", e)
-    
-    print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
