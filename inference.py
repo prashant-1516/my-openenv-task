@@ -7,14 +7,16 @@ import time
 import requests
 from openai import OpenAI
 
-# ── Platform-injected variables — use EXACTLY as injected, no modification ────
-API_BASE_URL = os.getenv("API_BASE_URL")   # NO default — must come from platform
-MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-API_KEY      = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
+# Exactly as platform specifies in HOW TO FIX
+client = OpenAI(
+    base_url=os.environ["API_BASE_URL"],
+    api_key=os.environ["API_KEY"],
+)
 
-ENV_BASE_URL      = "http://localhost:7860"
-BENCHMARK         = "icu-resource-allocation"
-MAX_STEPS         = 48
+MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+ENV_BASE_URL = "http://localhost:7860"
+BENCHMARK    = "icu-resource-allocation"
+MAX_STEPS    = 48
 SUCCESS_THRESHOLD = 0.40
 REQUEST_TIMEOUT   = 30
 
@@ -86,19 +88,16 @@ def _step_env(action):
         print(f"[DEBUG] step failed: {e}", flush=True)
         return None
 
-
 def _obs_to_prompt(obs):
     shift_names = ["Day", "Evening", "Night"]
     shift = shift_names[int(obs.get("shift", 0))]
     return "\n".join([
         f"Step {obs.get('step', 0)}/48  {obs.get('time_of_day', 8):.0f}:00  {shift}",
-        f"Beds {obs.get('beds_occupied', 0)}/20 | free={obs.get('beds_available', 0)} | turnover={obs.get('beds_in_turnover', 0)}",
-        f"Queue {obs.get('queue_total', 0)}: CRITICAL={obs.get('queue_critical', 0)} SEVERE={obs.get('queue_severe', 0)} MOD={obs.get('queue_moderate', 0)}",
-        f"Longest wait: {obs.get('queue_max_wait_steps', 0)} steps",
-        f"ICU avg_SOFA={obs.get('avg_icu_sofa', 0):.1f} avg_mortality={obs.get('avg_icu_mortality_risk', 0):.1%}",
-        f"Nurses {obs.get('nurses_on_duty', 10)} ratio={obs.get('nurse_patient_ratio', 1.2):.1f}/2.0",
+        f"Beds {obs.get('beds_occupied', 0)}/20 | free={obs.get('beds_available', 0)}",
+        f"Queue {obs.get('queue_total', 0)}: CRITICAL={obs.get('queue_critical', 0)}",
+        f"Nurses ratio={obs.get('nurse_patient_ratio', 1.2):.1f}/2.0",
         f"Budget Rs{int(obs.get('budget_remaining_inr', 150000))} remaining",
-        f"deaths={obs.get('deaths_in_queue', 0)} adverse={obs.get('adverse_events', 0)} wait_violations={obs.get('wait_violations', 0)}",
+        f"deaths={obs.get('deaths_in_queue', 0)} adverse={obs.get('adverse_events', 0)}",
         "Action? Reply with ONE digit 0-6.",
     ])
 
@@ -113,8 +112,7 @@ def _fallback(obs):
         return 2
     return 0
 
-def _get_action(client, obs):
-    # Always call LLM — never silently skip. Fallback only on exception.
+def _get_action(obs):
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -132,13 +130,10 @@ def _get_action(client, obs):
             return a
     return _fallback(obs)
 
-
 def _score(task_id, m):
     try:
         if task_id == "task_easy":
-            death_penalty = min(0.999, m["deaths"] * 0.25)
-            ratio_score   = 1.0 - m["ratio_breach_frac"]
-            raw = 0.60 * (1.0 - death_penalty) + 0.40 * ratio_score
+            raw = 0.60 * max(0.0, 1.0 - m["deaths"] * 0.25) + 0.40 * (1.0 - m["ratio_breach_frac"])
         elif task_id == "task_medium":
             raw = (0.40 * max(0.0, 1.0 - m["deaths"] * 0.30) +
                    0.30 * (1.0 - m["ratio_breach_frac"]) +
@@ -153,20 +148,16 @@ def _score(task_id, m):
                    0.15 * budget_s + 0.15 * sofa_s)
         else:
             raw = 0.0
-        scaled = raw * 0.92 + 0.04
-        return round(min(0.999, max(0.001, scaled)), 3)
+        return round(min(0.999, max(0.001, raw * 0.92 + 0.04)), 3)
     except Exception:
         return 0.001
 
-
-def run_task(task_id, client):
-    rewards        = []
-    ratio_breaches = []
-    sofa_traj      = []
-    steps_taken    = 0
-    score          = 0.001
-    success        = False
-    obs            = {}
+def run_task(task_id):
+    rewards, ratio_breaches, sofa_traj = [], [], []
+    steps_taken = 0
+    score = 0.001
+    success = False
+    obs = {}
 
     log_start(task=task_id, env_name=BENCHMARK, model=MODEL_NAME)
 
@@ -179,15 +170,14 @@ def run_task(task_id, client):
                 break
 
             try:
-                action_int = _get_action(client, obs)
+                action_int = _get_action(obs)
                 llm_error  = None
             except Exception as e:
-                print(f"[DEBUG] LLM error at step {step_n}: {e}", flush=True)
+                print(f"[DEBUG] LLM error: {e}", flush=True)
                 action_int = _fallback(obs)
                 llm_error  = f"llm_err:{type(e).__name__}"
 
             action_str = ACTION_NAMES.get(action_int, str(action_int))
-
             result = _step_env(action_int)
             if result is None:
                 log_step(step_n, action_str, 0.0, True, "step_http_failed")
@@ -199,47 +189,40 @@ def run_task(task_id, client):
             ratio_breaches.append(float(obs.get("nurse_patient_ratio", 1.0)) > 2.0)
             sofa_traj.append(float(obs.get("avg_icu_sofa", 0.0)))
             steps_taken = step_n
-
             log_step(step_n, action_str, reward, done, llm_error)
 
         if steps_taken > 0:
             n = max(1, len(ratio_breaches))
-            sofa_trend = (sofa_traj[-1] - sofa_traj[0]) if len(sofa_traj) >= 2 else 0.0
             metrics = {
                 "deaths":            int(obs.get("deaths_in_queue", 0)),
                 "adverse":           int(obs.get("adverse_events", 0)),
                 "wait_violations":   int(obs.get("wait_violations", 0)),
                 "ratio_breach_frac": sum(ratio_breaches) / n,
                 "budget_used_pct":   float(obs.get("budget_utilisation_pct", 0)) / 100.0,
-                "sofa_trend":        sofa_trend,
+                "sofa_trend":        (sofa_traj[-1] - sofa_traj[0]) if len(sofa_traj) >= 2 else 0.0,
             }
             score   = _score(task_id, metrics)
             success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
         print(f"[DEBUG] task={task_id} CRASHED: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 def main():
-    print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
+    print(f"[DEBUG] API_BASE_URL={os.environ.get('API_BASE_URL')}", flush=True)
     print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
-    print(f"[DEBUG] API_KEY_LEN={len(API_KEY)}", flush=True)
+    print(f"[DEBUG] API_KEY set: {'API_KEY' in os.environ}", flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=90):
-        print("[DEBUG] Server not ready after 90s, continuing anyway", flush=True)
-
-    # Single client using platform-injected vars — exactly as-is
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    print("[DEBUG] OpenAI client ready", flush=True)
+        print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
-        run_task(task_id, client)
+        run_task(task_id)
 
 
 if __name__ == "__main__":
@@ -247,10 +230,9 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"[DEBUG] FATAL: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         for task_id in ["task_easy", "task_medium", "task_hard"]:
             log_start(task_id, BENCHMARK, MODEL_NAME)
-            log_end(success=False, steps=0, score=0.001, rewards=[])
+            log_end(False, 0, 0.001, [])
     finally:
         sys.exit(0)
