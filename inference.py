@@ -7,10 +7,10 @@ import time
 import requests
 from openai import OpenAI
 
-# Read platform-injected variables exactly as shown in the submission checklist
-API_BASE_URL = os.getenv("API_BASE_URL", "")
-MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN", "")   # Platform uses HF_TOKEN as the API key
+# Use env vars EXACTLY as the platform provides them — no modification
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
+HF_TOKEN     = os.getenv("HF_TOKEN")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -123,6 +123,7 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
+    error = None
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -138,11 +139,12 @@ def _get_action(client, obs):
         if raw and raw[0].isdigit():
             a = int(raw[0])
             if 0 <= a <= 6:
-                return a
-        return _fallback(obs)
+                return a, error
+        return _fallback(obs), error
     except Exception as e:
-        print("[DEBUG] LLM call error: " + str(e), flush=True)
-        return _fallback(obs)
+        error = str(e)
+        print("[DEBUG] LLM call error: " + error, flush=True)
+        return _fallback(obs), error
 
 
 def _score(task_id, m):
@@ -190,7 +192,7 @@ def run_task(task_id, client):
             if done:
                 break
 
-            action_int = _get_action(client, obs)
+            action_int, llm_error = _get_action(client, obs)
             action_str = ACTION_NAMES.get(action_int, str(action_int))
 
             result = _step_env(action_int)
@@ -205,7 +207,7 @@ def run_task(task_id, client):
             sofa_traj.append(float(obs.get("avg_icu_sofa", 0.0)))
             steps_taken = step_n
 
-            log_step(step_n, action_str, reward, done, None)
+            log_step(step_n, action_str, reward, done, llm_error)
 
         if steps_taken > 0:
             n = max(1, len(ratio_breaches))
@@ -231,32 +233,21 @@ def run_task(task_id, client):
 
 
 def main():
-    # ---------------------------------------------------------------
-    # Platform injects exactly these three variables (from checklist):
-    #   API_BASE_URL  — LiteLLM proxy endpoint
-    #   MODEL_NAME    — model identifier
-    #   HF_TOKEN      — the API key (this is NOT called "API_KEY")
-    # ---------------------------------------------------------------
-    api_base_url = os.getenv("API_BASE_URL", "")
-    hf_token     = os.getenv("HF_TOKEN", "")
+    if not HF_TOKEN:
+        print("ERROR: HF_TOKEN environment variable not set.", flush=True)
+        sys.exit(1)
 
-    # Ensure /v1 is in the path — OpenAI SDK appends /chat/completions
-    # to base_url, so LiteLLM only receives the call if /v1 is present.
-    stripped = api_base_url.rstrip("/")
-    if not stripped.endswith("/v1"):
-        stripped = stripped + "/v1"
-    api_base_url = stripped
-
-    print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
+    # Use API_BASE_URL exactly as the platform provides it — no modification
+    print("[DEBUG] API_BASE_URL=" + API_BASE_URL, flush=True)
     print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
-    print("[DEBUG] HF_TOKEN_LEN=" + str(len(hf_token)), flush=True)
+    print("[DEBUG] HF_TOKEN_LEN=" + str(len(HF_TOKEN)), flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Single client — every LLM call goes through the platform proxy
-    client = OpenAI(base_url=api_base_url, api_key=hf_token)
+    # Single client — all LLM calls go through the platform proxy
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
