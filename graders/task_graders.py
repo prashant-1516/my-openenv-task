@@ -22,6 +22,90 @@ def _strict(score: float) -> float:
     return round(min(_SCORE_MAX, max(_SCORE_MIN, float(score))), 4)
 
 
+# ---------------------------------------------------------------------------
+# LLM agent — uses platform-injected API_BASE_URL and API_KEY
+# ---------------------------------------------------------------------------
+
+def _make_llm_agent():
+    """
+    Build an OpenAI-compatible agent that routes through the platform's
+    LiteLLM proxy.  Uses API_BASE_URL and API_KEY exactly as injected —
+    no URL manipulation.
+    """
+    try:
+        from openai import OpenAI
+
+        api_base_url = os.environ["API_BASE_URL"]
+        api_key      = os.environ["API_KEY"]
+        model        = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+
+        # Use base_url exactly as provided — do NOT append /v1
+        client = OpenAI(base_url=api_base_url, api_key=api_key)
+
+        SYSTEM_PROMPT = (
+            "You are an ICU charge coordinator at a 500-bed Indian hospital. "
+            "Every 30 minutes allocate scarce ICU resources. "
+            "20 beds | 12 vents | 4 dialysis | budget Rs150000/day. "
+            "NABH: max 2 patients/nurse. SOFA>=11 is CRITICAL, admit within 2 hours. "
+            "ACTIONS - reply ONLY one digit: "
+            "0=HOLD 1=ADMIT_CRITICAL 2=ADMIT_FIFO 3=TRANSFER_OUT "
+            "4=CALL_EXTRA_NURSE 5=SPECIALIST_CONSULT 6=EXPEDITE_BED. "
+            "Priority: admit critical first, keep nurse ratio<=2.0, stay within budget. "
+            "Reply with ONE digit 0-6 and nothing else."
+        )
+
+        def _obs_to_prompt(obs):
+            shift_names = ["Day", "Evening", "Night"]
+            shift = shift_names[int(obs.get("shift", 0))]
+            lines = [
+                "Step " + str(obs.get("step", 0)) + "/48  " + str(obs.get("time_of_day", 8)) + ":00  " + shift,
+                "Beds " + str(obs.get("beds_occupied", 0)) + "/20 | free=" + str(obs.get("beds_available", 0)),
+                "Queue " + str(obs.get("queue_total", 0)) + ": CRITICAL=" + str(obs.get("queue_critical", 0)),
+                "Nurses " + str(obs.get("nurses_on_duty", 10)) + " ratio=" + str(obs.get("nurse_patient_ratio", 1.2)),
+                "Budget Rs" + str(int(obs.get("budget_remaining_inr", 150000))) + " remaining",
+                "Action? Reply with ONE digit 0-6.",
+            ]
+            return "\n".join(lines)
+
+        def _fallback(obs):
+            if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
+                return 1
+            if obs.get("nurse_patient_ratio", 1.0) > 2.2:
+                return 4
+            if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
+                return 3
+            if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
+                return 2
+            return 0
+
+        def agent(obs):
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user",   "content": _obs_to_prompt(obs)},
+                    ],
+                    max_tokens=5,
+                    temperature=0.0,
+                )
+                raw = (resp.choices[0].message.content or "").strip()
+                if raw and raw[0].isdigit():
+                    a = int(raw[0])
+                    if 0 <= a <= 6:
+                        return a
+                return _fallback(obs)
+            except Exception as e:
+                print("[GRADER] LLM call failed: " + str(e) + " — using fallback", flush=True)
+                return _fallback(obs)
+
+        return agent
+
+    except (KeyError, ImportError) as e:
+        print("[GRADER] Could not build LLM agent (" + str(e) + "), using rule-based fallback", flush=True)
+        return _make_rule_based_agent()
+
+
 def _run_episode(agent_fn, seed: int = 42) -> dict:
     """Run a full episode and collect all outcome metrics."""
     env = ICUEnv(seed=seed)
@@ -67,12 +151,14 @@ def _run_episode(agent_fn, seed: int = 42) -> dict:
 # Task 1 — EASY
 # ─────────────────────────────────────────────────────────────────────────────
 
-def grade_task_easy(agent_fn, seed: int = 42) -> float:
+def grade_task_easy(agent_fn=None, seed: int = 42) -> float:
     """
     Score strictly in (0, 1).
     Higher score for: zero deaths AND low nurse-ratio breach fraction.
     Uses linear scaling to guarantee strict (0, 1) exclusivity.
     """
+    if agent_fn is None:
+        agent_fn = _make_llm_agent()
     m = _run_episode(agent_fn, seed)
 
     death_penalty = min(0.999, m["deaths_in_queue"] * 0.25)
@@ -88,11 +174,13 @@ def grade_task_easy(agent_fn, seed: int = 42) -> float:
 # Task 2 — MEDIUM
 # ─────────────────────────────────────────────────────────────────────────────
 
-def grade_task_medium(agent_fn, seed: int = 42) -> float:
+def grade_task_medium(agent_fn=None, seed: int = 42) -> float:
     """
     Score strictly in (0, 1).
     Higher for: zero deaths + safe ratios + zero wait violations.
     """
+    if agent_fn is None:
+        agent_fn = _make_llm_agent()
     m = _run_episode(agent_fn, seed)
 
     death_score = max(0.0, 1.0 - m["deaths_in_queue"] * 0.30)
@@ -108,12 +196,14 @@ def grade_task_medium(agent_fn, seed: int = 42) -> float:
 # Task 3 — HARD
 # ─────────────────────────────────────────────────────────────────────────────
 
-def grade_task_hard(agent_fn, seed: int = 42) -> float:
+def grade_task_hard(agent_fn=None, seed: int = 42) -> float:
     """
     Score strictly in (0, 1).
     Higher for: zero deaths, zero adverse events, zero wait violations,
     budget <= 85%, SOFA trend <= 0.
     """
+    if agent_fn is None:
+        agent_fn = _make_llm_agent()
     m = _run_episode(agent_fn, seed)
 
     death_score   = max(0.0, 1.0 - m["deaths_in_queue"] * 0.35)
