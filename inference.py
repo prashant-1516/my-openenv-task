@@ -7,10 +7,10 @@ import time
 import requests
 from openai import OpenAI
 
-# ── Platform-injected variables (use exactly as-is, no modification) ──────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+# ── Platform-injected variables — use EXACTLY as injected, no modification ────
+API_BASE_URL = os.getenv("API_BASE_URL")   # NO default — must come from platform
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+API_KEY      = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -19,13 +19,9 @@ SUCCESS_THRESHOLD = 0.40
 REQUEST_TIMEOUT   = 30
 
 ACTION_NAMES = {
-    0: "HOLD",
-    1: "ADMIT_CRITICAL",
-    2: "ADMIT_FIFO",
-    3: "TRANSFER_OUT",
-    4: "CALL_EXTRA_NURSE",
-    5: "SPECIALIST_CONSULT",
-    6: "EXPEDITE_BED",
+    0: "HOLD", 1: "ADMIT_CRITICAL", 2: "ADMIT_FIFO",
+    3: "TRANSFER_OUT", 4: "CALL_EXTRA_NURSE",
+    5: "SPECIALIST_CONSULT", 6: "EXPEDITE_BED",
 }
 
 SYSTEM_PROMPT = (
@@ -40,8 +36,6 @@ SYSTEM_PROMPT = (
     "Reply with ONE digit 0-6 and nothing else."
 )
 
-
-# ── Logging ───────────────────────────────────────────────────────────────────
 
 def log_start(task, env_name, model):
     print(f"[START] task={task} env={env_name} model={model}", flush=True)
@@ -61,8 +55,6 @@ def log_end(success, steps, score, rewards):
         flush=True,
     )
 
-
-# ── Server helpers ────────────────────────────────────────────────────────────
 
 def _wait_for_server(max_wait=90):
     for _ in range(max_wait):
@@ -95,8 +87,6 @@ def _step_env(action):
         return None
 
 
-# ── Agent ─────────────────────────────────────────────────────────────────────
-
 def _obs_to_prompt(obs):
     shift_names = ["Day", "Evening", "Night"]
     shift = shift_names[int(obs.get("shift", 0))]
@@ -114,39 +104,34 @@ def _obs_to_prompt(obs):
 
 def _fallback(obs):
     if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
-        return 1  # ADMIT_CRITICAL
+        return 1
     if obs.get("nurse_patient_ratio", 1.0) > 2.2:
-        return 4  # CALL_EXTRA_NURSE
+        return 4
     if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
-        return 3  # TRANSFER_OUT
+        return 3
     if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
-        return 2  # ADMIT_FIFO
-    return 0  # HOLD
+        return 2
+    return 0
 
 def _get_action(client, obs):
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": _obs_to_prompt(obs)},
-            ],
-            max_tokens=5,
-            temperature=0.0,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        print(f"[DEBUG] LLM raw={raw}", flush=True)
-        if raw and raw[0].isdigit():
-            a = int(raw[0])
-            if 0 <= a <= 6:
-                return a, None
-        return _fallback(obs), f"bad_llm_output:{raw[:20]}"
-    except Exception as e:
-        print(f"[DEBUG] LLM error: {e}", flush=True)
-        return _fallback(obs), f"llm_err:{type(e).__name__}"
+    # Always call LLM — never silently skip. Fallback only on exception.
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _obs_to_prompt(obs)},
+        ],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    print(f"[DEBUG] LLM raw={raw}", flush=True)
+    if raw and raw[0].isdigit():
+        a = int(raw[0])
+        if 0 <= a <= 6:
+            return a
+    return _fallback(obs)
 
-
-# ── Scoring ───────────────────────────────────────────────────────────────────
 
 def _score(task_id, m):
     try:
@@ -174,8 +159,6 @@ def _score(task_id, m):
         return 0.001
 
 
-# ── Episode runner ────────────────────────────────────────────────────────────
-
 def run_task(task_id, client):
     rewards        = []
     ratio_breaches = []
@@ -195,7 +178,14 @@ def run_task(task_id, client):
             if done:
                 break
 
-            action_int, llm_error = _get_action(client, obs)
+            try:
+                action_int = _get_action(client, obs)
+                llm_error  = None
+            except Exception as e:
+                print(f"[DEBUG] LLM error at step {step_n}: {e}", flush=True)
+                action_int = _fallback(obs)
+                llm_error  = f"llm_err:{type(e).__name__}"
+
             action_str = ACTION_NAMES.get(action_int, str(action_int))
 
             result = _step_env(action_int)
@@ -235,8 +225,6 @@ def run_task(task_id, client):
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
     print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
@@ -246,7 +234,7 @@ def main():
     if not _wait_for_server(max_wait=90):
         print("[DEBUG] Server not ready after 90s, continuing anyway", flush=True)
 
-    # Use API_BASE_URL exactly as injected by platform — do NOT modify it
+    # Single client using platform-injected vars — exactly as-is
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     print("[DEBUG] OpenAI client ready", flush=True)
 
