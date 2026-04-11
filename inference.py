@@ -7,10 +7,14 @@ import time
 import requests
 from openai import OpenAI
 
-# Use env vars EXACTLY as the platform provides them — no modification
+# Platform injects all three of these:
+#   API_BASE_URL  — the LiteLLM proxy endpoint (already includes /v1)
+#   MODEL_NAME    — model identifier
+#   API_KEY       — the key the proxy tracks (NOT HF_TOKEN)
+#   HF_TOKEN      — HuggingFace Space auth (different purpose)
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN")
+API_KEY      = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -233,21 +237,19 @@ def run_task(task_id, client):
 
 
 def main():
-    if not HF_TOKEN:
-        print("ERROR: HF_TOKEN environment variable not set.", flush=True)
-        sys.exit(1)
-
-    # Use API_BASE_URL exactly as the platform provides it — no modification
     print("[DEBUG] API_BASE_URL=" + API_BASE_URL, flush=True)
     print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
-    print("[DEBUG] HF_TOKEN_LEN=" + str(len(HF_TOKEN)), flush=True)
+    print("[DEBUG] API_KEY present=" + str(bool(os.getenv("API_KEY"))), flush=True)
+    print("[DEBUG] HF_TOKEN present=" + str(bool(os.getenv("HF_TOKEN"))), flush=True)
+    print("[DEBUG] Using key length=" + str(len(API_KEY)), flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Single client — all LLM calls go through the platform proxy
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    # Use API_BASE_URL exactly as provided (already includes /v1)
+    # Use API_KEY as the proxy-tracked credential (falls back to HF_TOKEN)
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
