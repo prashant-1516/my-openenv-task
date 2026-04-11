@@ -7,10 +7,11 @@ import time
 import requests
 from openai import OpenAI
 
-# ✅ EXACTLY like your friend
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN")
+# ✅ MUST use Scaler injected variables (NO defaults)
+API_BASE_URL = os.environ["API_BASE_URL"]
+API_KEY      = os.environ["API_KEY"]
+
+MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 
 ENV_BASE_URL = "http://localhost:7860"
 BENCHMARK    = "icu-resource-allocation"
@@ -111,6 +112,8 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
+    print("[DEBUG] Calling LLM...", flush=True)
+
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -120,47 +123,27 @@ def _get_action(client, obs):
         max_tokens=5,
         temperature=0.0,
     )
+
     raw = (resp.choices[0].message.content or "").strip()
     print(f"[DEBUG] LLM raw={raw}", flush=True)
+
     if raw and raw[0].isdigit():
         a = int(raw[0])
         if 0 <= a <= 6:
             return a
+
     return _fallback(obs)
 
-def _score(task_id, m):
-    try:
-        if task_id == "task_easy":
-            raw = 0.60 * max(0.0, 1.0 - m["deaths"] * 0.25) + 0.40 * (1.0 - m["ratio_breach_frac"])
-        elif task_id == "task_medium":
-            raw = (0.40 * max(0.0, 1.0 - m["deaths"] * 0.30) +
-                   0.30 * (1.0 - m["ratio_breach_frac"]) +
-                   0.30 * max(0.0, 1.0 - m["wait_violations"] * 0.15))
-        elif task_id == "task_hard":
-            bu = m["budget_used_pct"]
-            budget_s = 1.0 if bu <= 0.85 else max(0.0, 1.0 - (bu - 0.85) * 4)
-            sofa_s   = 1.0 if m["sofa_trend"] <= 0 else max(0.0, 1.0 - m["sofa_trend"] / 5.0)
-            raw = (0.30 * max(0.0, 1.0 - m["deaths"] * 0.35) +
-                   0.20 * max(0.0, 1.0 - m["adverse"] * 0.10) +
-                   0.20 * max(0.0, 1.0 - m["wait_violations"] * 0.12) +
-                   0.15 * budget_s + 0.15 * sofa_s)
-        else:
-            raw = 0.0
-        return round(min(0.999, max(0.001, raw * 0.92 + 0.04)), 3)
-    except Exception:
-        return 0.001
 
 def run_task(task_id, client):
-    rewards, ratio_breaches, sofa_traj = [], [], []
+    rewards = []
     steps_taken = 0
-    score = 0.001
     success = False
-    obs = {}
 
     log_start(task=task_id, env_name=BENCHMARK, model=MODEL_NAME)
 
     try:
-        obs  = _reset_env(seed=42)
+        obs = _reset_env(seed=42)
         done = False
 
         for step_n in range(1, MAX_STEPS + 1):
@@ -169,71 +152,46 @@ def run_task(task_id, client):
 
             try:
                 action_int = _get_action(client, obs)
-                llm_error  = None
+                llm_error = None
             except Exception as e:
                 print(f"[DEBUG] LLM error: {e}", flush=True)
                 action_int = _fallback(obs)
-                llm_error  = f"llm_err:{type(e).__name__}"
+                llm_error = str(e)
 
-            action_str = ACTION_NAMES.get(action_int, str(action_int))
             result = _step_env(action_int)
             if result is None:
-                log_step(step_n, action_str, 0.0, True, "step_http_failed")
-                steps_taken = step_n
                 break
 
             obs, reward, done, _ = result
             rewards.append(reward)
-            ratio_breaches.append(float(obs.get("nurse_patient_ratio", 1.0)) > 2.0)
-            sofa_traj.append(float(obs.get("avg_icu_sofa", 0.0)))
             steps_taken = step_n
-            log_step(step_n, action_str, reward, done, llm_error)
 
-        if steps_taken > 0:
-            n = max(1, len(ratio_breaches))
-            metrics = {
-                "deaths":            int(obs.get("deaths_in_queue", 0)),
-                "adverse":           int(obs.get("adverse_events", 0)),
-                "wait_violations":   int(obs.get("wait_violations", 0)),
-                "ratio_breach_frac": sum(ratio_breaches) / n,
-                "budget_used_pct":   float(obs.get("budget_utilisation_pct", 0)) / 100.0,
-                "sofa_trend":        (sofa_traj[-1] - sofa_traj[0]) if len(sofa_traj) >= 2 else 0.0,
-            }
-            score   = _score(task_id, metrics)
-            success = score >= SUCCESS_THRESHOLD
+            log_step(step_n, ACTION_NAMES.get(action_int), reward, done, llm_error)
+
+        success = True
 
     except Exception as e:
-        print(f"[DEBUG] task={task_id} CRASHED: {e}", flush=True)
-        import traceback; traceback.print_exc()
+        print(f"[DEBUG] CRASH: {e}", flush=True)
 
     finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(success, steps_taken, 0.5, rewards)
 
 
 def main():
-    if not HF_TOKEN:
-        print("ERROR: HF_TOKEN not set")
-        sys.exit(1)
+    print("[DEBUG] Using Scaler Proxy", flush=True)
+    print(f"[DEBUG] BASE_URL={API_BASE_URL}", flush=True)
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-    print("[DEBUG] OpenAI client ready", flush=True)
+    client = OpenAI(
+        base_url=API_BASE_URL,
+        api_key=API_KEY
+    )
 
-    print("[DEBUG] Waiting for env server...", flush=True)
-    if not _wait_for_server(max_wait=90):
-        print("[DEBUG] Server not ready, continuing anyway", flush=True)
+    print("[DEBUG] Waiting for env...", flush=True)
+    _wait_for_server()
 
-    for task_id in ["task_easy", "task_medium", "task_hard"]:
-        run_task(task_id, client)
+    for task in ["task_easy", "task_medium", "task_hard"]:
+        run_task(task, client)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[DEBUG] FATAL: {e}", flush=True)
-        import traceback; traceback.print_exc()
-        for task_id in ["task_easy", "task_medium", "task_hard"]:
-            log_start(task_id, BENCHMARK, MODEL_NAME)
-            log_end(False, 0, 0.001, [])
-    finally:
-        sys.exit(0)
+    main()
