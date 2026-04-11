@@ -7,12 +7,6 @@ import time
 import requests
 from openai import OpenAI
 
-# Exactly as platform specifies in HOW TO FIX
-client = OpenAI(
-    base_url=os.environ["API_BASE_URL"],
-    api_key=os.environ["API_KEY"],
-)
-
 MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 ENV_BASE_URL = "http://localhost:7860"
 BENCHMARK    = "icu-resource-allocation"
@@ -112,7 +106,7 @@ def _fallback(obs):
         return 2
     return 0
 
-def _get_action(obs):
+def _get_action(client, obs):
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -152,7 +146,7 @@ def _score(task_id, m):
     except Exception:
         return 0.001
 
-def run_task(task_id):
+def run_task(task_id, client):
     rewards, ratio_breaches, sofa_traj = [], [], []
     steps_taken = 0
     score = 0.001
@@ -170,7 +164,7 @@ def run_task(task_id):
                 break
 
             try:
-                action_int = _get_action(obs)
+                action_int = _get_action(client, obs)
                 llm_error  = None
             except Exception as e:
                 print(f"[DEBUG] LLM error: {e}", flush=True)
@@ -213,16 +207,23 @@ def run_task(task_id):
 
 
 def main():
-    print(f"[DEBUG] API_BASE_URL={os.environ.get('API_BASE_URL')}", flush=True)
+    # Read env vars here — guaranteed to be injected by now
+    api_base_url = os.environ["API_BASE_URL"]
+    api_key      = os.environ["API_KEY"]
+
+    print(f"[DEBUG] API_BASE_URL={api_base_url}", flush=True)
     print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
-    print(f"[DEBUG] API_KEY set: {'API_KEY' in os.environ}", flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=90):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
+    # Create client inside main() — env vars are available here
+    client = OpenAI(base_url=api_base_url, api_key=api_key)
+    print("[DEBUG] OpenAI client ready", flush=True)
+
     for task_id in ["task_easy", "task_medium", "task_hard"]:
-        run_task(task_id)
+        run_task(task_id, client)
 
 
 if __name__ == "__main__":
