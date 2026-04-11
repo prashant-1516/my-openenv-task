@@ -7,7 +7,11 @@ import time
 import requests
 from openai import OpenAI
 
-MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+# ✅ EXACTLY like your friend
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+HF_TOKEN     = os.getenv("HF_TOKEN")
+
 ENV_BASE_URL = "http://localhost:7860"
 BENCHMARK    = "icu-resource-allocation"
 MAX_STEPS    = 48
@@ -207,22 +211,16 @@ def run_task(task_id, client):
 
 
 def main():
-    # ✅ FIXED HERE
-    api_base_url = os.environ["API_BASE_URL"].rstrip("/")
-    if not api_base_url.endswith("/v1"):
-        api_base_url += "/v1"
+    if not HF_TOKEN:
+        print("ERROR: HF_TOKEN not set")
+        sys.exit(1)
 
-    api_key = os.environ["HF_TOKEN"]   # 🔥 IMPORTANT FIX
-
-    print(f"[DEBUG] API_BASE_URL={api_base_url}", flush=True)
-    print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    print("[DEBUG] OpenAI client ready", flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=90):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
-
-    client = OpenAI(base_url=api_base_url, api_key=api_key)
-    print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
