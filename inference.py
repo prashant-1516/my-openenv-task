@@ -7,10 +7,10 @@ import time
 import requests
 from openai import OpenAI
 
-# Read platform-injected variables exactly as shown in the submission checklist
-API_BASE_URL = os.getenv("API_BASE_URL", "")
+# ── Platform-injected variables (use exactly as-is, no modification) ──────────
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN", "")   # Platform uses HF_TOKEN as the API key
+API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -41,30 +41,30 @@ SYSTEM_PROMPT = (
 )
 
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+
 def log_start(task, env_name, model):
-    print("[START] task=" + task + " env=" + env_name + " model=" + model, flush=True)
+    print(f"[START] task={task} env={env_name} model={model}", flush=True)
 
 def log_step(step, action, reward, done, error):
     print(
-        "[STEP] step=" + str(step) +
-        " action=" + str(action) +
-        " reward=" + "{:.2f}".format(reward) +
-        " done=" + ("true" if done else "false") +
-        " error=" + (str(error) if error else "null"),
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error if error else 'null'}",
         flush=True,
     )
 
 def log_end(success, steps, score, rewards):
     print(
-        "[END] success=" + ("true" if success else "false") +
-        " steps=" + str(steps) +
-        " score=" + "{:.3f}".format(score) +
-        " rewards=" + ",".join("{:.2f}".format(r) for r in rewards),
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} "
+        f"rewards={','.join(f'{r:.2f}' for r in rewards)}",
         flush=True,
     )
 
 
-def _wait_for_server(max_wait=60):
+# ── Server helpers ────────────────────────────────────────────────────────────
+
+def _wait_for_server(max_wait=90):
     for _ in range(max_wait):
         try:
             r = requests.get(ENV_BASE_URL + "/", timeout=5)
@@ -81,7 +81,7 @@ def _reset_env(seed=42):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print("[DEBUG] reset failed: " + str(e), flush=True)
+        print(f"[DEBUG] reset failed: {e}", flush=True)
         return {}
 
 def _step_env(action):
@@ -91,36 +91,37 @@ def _step_env(action):
         data = r.json()
         return data["observation"], float(data["reward"]), bool(data["done"]), data.get("info", {})
     except Exception as e:
-        print("[DEBUG] step failed: " + str(e), flush=True)
+        print(f"[DEBUG] step failed: {e}", flush=True)
         return None
 
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
 
 def _obs_to_prompt(obs):
     shift_names = ["Day", "Evening", "Night"]
     shift = shift_names[int(obs.get("shift", 0))]
-    lines = [
-        "Step " + str(obs.get("step", 0)) + "/48  " + str(obs.get("time_of_day", 8)) + ":00  " + shift,
-        "Beds " + str(obs.get("beds_occupied", 0)) + "/20 | free=" + str(obs.get("beds_available", 0)) + " | turnover=" + str(obs.get("beds_in_turnover", 0)),
-        "Queue " + str(obs.get("queue_total", 0)) + ": CRITICAL=" + str(obs.get("queue_critical", 0)) + " SEVERE=" + str(obs.get("queue_severe", 0)) + " MOD=" + str(obs.get("queue_moderate", 0)),
-        "Longest wait: " + str(obs.get("queue_max_wait_steps", 0)) + " steps",
-        "ICU avg_SOFA=" + str(obs.get("avg_icu_sofa", 0)) + " avg_mortality=" + str(obs.get("avg_icu_mortality_risk", 0)),
-        "Nurses " + str(obs.get("nurses_on_duty", 10)) + " ratio=" + str(obs.get("nurse_patient_ratio", 1.2)) + "/2.0",
-        "Budget Rs" + str(int(obs.get("budget_remaining_inr", 150000))) + " remaining",
-        "deaths=" + str(obs.get("deaths_in_queue", 0)) + " adverse=" + str(obs.get("adverse_events", 0)) + " wait_violations=" + str(obs.get("wait_violations", 0)),
+    return "\n".join([
+        f"Step {obs.get('step', 0)}/48  {obs.get('time_of_day', 8):.0f}:00  {shift}",
+        f"Beds {obs.get('beds_occupied', 0)}/20 | free={obs.get('beds_available', 0)} | turnover={obs.get('beds_in_turnover', 0)}",
+        f"Queue {obs.get('queue_total', 0)}: CRITICAL={obs.get('queue_critical', 0)} SEVERE={obs.get('queue_severe', 0)} MOD={obs.get('queue_moderate', 0)}",
+        f"Longest wait: {obs.get('queue_max_wait_steps', 0)} steps",
+        f"ICU avg_SOFA={obs.get('avg_icu_sofa', 0):.1f} avg_mortality={obs.get('avg_icu_mortality_risk', 0):.1%}",
+        f"Nurses {obs.get('nurses_on_duty', 10)} ratio={obs.get('nurse_patient_ratio', 1.2):.1f}/2.0",
+        f"Budget Rs{int(obs.get('budget_remaining_inr', 150000))} remaining",
+        f"deaths={obs.get('deaths_in_queue', 0)} adverse={obs.get('adverse_events', 0)} wait_violations={obs.get('wait_violations', 0)}",
         "Action? Reply with ONE digit 0-6.",
-    ]
-    return "\n".join(lines)
+    ])
 
 def _fallback(obs):
     if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
-        return 1
+        return 1  # ADMIT_CRITICAL
     if obs.get("nurse_patient_ratio", 1.0) > 2.2:
-        return 4
+        return 4  # CALL_EXTRA_NURSE
     if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
-        return 3
+        return 3  # TRANSFER_OUT
     if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
-        return 2
-    return 0
+        return 2  # ADMIT_FIFO
+    return 0  # HOLD
 
 def _get_action(client, obs):
     try:
@@ -134,16 +135,18 @@ def _get_action(client, obs):
             temperature=0.0,
         )
         raw = (resp.choices[0].message.content or "").strip()
-        print("[DEBUG] LLM raw=" + raw, flush=True)
+        print(f"[DEBUG] LLM raw={raw}", flush=True)
         if raw and raw[0].isdigit():
             a = int(raw[0])
             if 0 <= a <= 6:
-                return a
-        return _fallback(obs)
+                return a, None
+        return _fallback(obs), f"bad_llm_output:{raw[:20]}"
     except Exception as e:
-        print("[DEBUG] LLM call error: " + str(e), flush=True)
-        return _fallback(obs)
+        print(f"[DEBUG] LLM error: {e}", flush=True)
+        return _fallback(obs), f"llm_err:{type(e).__name__}"
 
+
+# ── Scoring ───────────────────────────────────────────────────────────────────
 
 def _score(task_id, m):
     try:
@@ -171,26 +174,28 @@ def _score(task_id, m):
         return 0.001
 
 
+# ── Episode runner ────────────────────────────────────────────────────────────
+
 def run_task(task_id, client):
-    rewards = []
+    rewards        = []
     ratio_breaches = []
-    sofa_traj = []
-    steps_taken = 0
-    score = 0.001
-    success = False
-    obs = {}
+    sofa_traj      = []
+    steps_taken    = 0
+    score          = 0.001
+    success        = False
+    obs            = {}
 
     log_start(task=task_id, env_name=BENCHMARK, model=MODEL_NAME)
 
     try:
-        obs = _reset_env(seed=42)
+        obs  = _reset_env(seed=42)
         done = False
 
         for step_n in range(1, MAX_STEPS + 1):
             if done:
                 break
 
-            action_int = _get_action(client, obs)
+            action_int, llm_error = _get_action(client, obs)
             action_str = ACTION_NAMES.get(action_int, str(action_int))
 
             result = _step_env(action_int)
@@ -205,7 +210,7 @@ def run_task(task_id, client):
             sofa_traj.append(float(obs.get("avg_icu_sofa", 0.0)))
             steps_taken = step_n
 
-            log_step(step_n, action_str, reward, done, None)
+            log_step(step_n, action_str, reward, done, llm_error)
 
         if steps_taken > 0:
             n = max(1, len(ratio_breaches))
@@ -222,7 +227,7 @@ def run_task(task_id, client):
             success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        print("[DEBUG] task=" + task_id + " CRASHED: " + str(e), flush=True)
+        print(f"[DEBUG] task={task_id} CRASHED: {e}", flush=True)
         import traceback
         traceback.print_exc()
 
@@ -230,33 +235,19 @@ def run_task(task_id, client):
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
-    # ---------------------------------------------------------------
-    # Platform injects exactly these three variables (from checklist):
-    #   API_BASE_URL  — LiteLLM proxy endpoint
-    #   MODEL_NAME    — model identifier
-    #   HF_TOKEN      — the API key (this is NOT called "API_KEY")
-    # ---------------------------------------------------------------
-    api_base_url = os.getenv("API_BASE_URL", "")
-    hf_token     = os.getenv("HF_TOKEN", "")
-
-    # Ensure /v1 is in the path — OpenAI SDK appends /chat/completions
-    # to base_url, so LiteLLM only receives the call if /v1 is present.
-    stripped = api_base_url.rstrip("/")
-    if not stripped.endswith("/v1"):
-        stripped = stripped + "/v1"
-    api_base_url = stripped
-
-    print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
-    print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
-    print("[DEBUG] HF_TOKEN_LEN=" + str(len(hf_token)), flush=True)
+    print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
+    print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
+    print(f"[DEBUG] API_KEY_LEN={len(API_KEY)}", flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
-    if not _wait_for_server(max_wait=60):
-        print("[DEBUG] Server not ready, continuing anyway", flush=True)
+    if not _wait_for_server(max_wait=90):
+        print("[DEBUG] Server not ready after 90s, continuing anyway", flush=True)
 
-    # Single client — every LLM call goes through the platform proxy
-    client = OpenAI(base_url=api_base_url, api_key=hf_token)
+    # Use API_BASE_URL exactly as injected by platform — do NOT modify it
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
@@ -267,7 +258,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print("[DEBUG] FATAL: " + str(e), flush=True)
+        print(f"[DEBUG] FATAL: {e}", flush=True)
         import traceback
         traceback.print_exc()
         for task_id in ["task_easy", "task_medium", "task_hard"]:
