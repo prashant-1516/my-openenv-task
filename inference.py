@@ -7,7 +7,7 @@ import time
 import requests
 from openai import OpenAI
 
-MODEL_NAME = os.environ.get("MODEL_NAME")
+MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -120,22 +120,26 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": _obs_to_prompt(obs)},
-        ],
-        max_tokens=5,
-        temperature=0.0,
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    print("[DEBUG] LLM raw=" + raw, flush=True)
-    if raw and raw[0].isdigit():
-        a = int(raw[0])
-        if 0 <= a <= 6:
-            return a
-    return _fallback(obs)
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": _obs_to_prompt(obs)},
+            ],
+            max_tokens=5,
+            temperature=0.0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        print("[DEBUG] LLM raw=" + raw, flush=True)
+        if raw and raw[0].isdigit():
+            a = int(raw[0])
+            if 0 <= a <= 6:
+                return a
+        return _fallback(obs)
+    except Exception as e:
+        print("[DEBUG] LLM call failed: " + str(e) + " — using fallback", flush=True)
+        return _fallback(obs)
 
 
 def _score(task_id, m):
@@ -224,11 +228,9 @@ def run_task(task_id, client):
 
 
 def main():
+    # Read platform-injected vars — use EXACTLY as provided, do NOT modify the URL
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
-
-    print("BASE URL:", api_base_url)
-    print("MODEL:", MODEL_NAME)
 
     print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
     print("[DEBUG] API_KEY_LEN=" + str(len(api_key)), flush=True)
@@ -240,18 +242,6 @@ def main():
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     print("[DEBUG] OpenAI client ready", flush=True)
-
-    print("Testing API call...")
-
-    try:
-        test = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Say 1"}],
-            max_tokens=5
-        )
-        print("Test response:", test.choices[0].message.content)
-    except Exception as e:
-        print("LLM ERROR:", e)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
