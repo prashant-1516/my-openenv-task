@@ -21,28 +21,21 @@ def _strict(score: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# LLM agent — uses platform-injected env vars (HF_TOKEN as API key)
+# LLM agent — uses platform-injected env vars
+# IMPORTANT: Use API_BASE_URL exactly as injected. Use API_KEY (not HF_TOKEN).
 # ---------------------------------------------------------------------------
 
 def _make_llm_agent():
-    """
-    Build an agent using the platform's LiteLLM proxy.
-    Uses HF_TOKEN as the api_key, exactly as the submission checklist shows.
-    """
     try:
         from openai import OpenAI
 
-        api_base_url = os.getenv("API_BASE_URL", "")
-        hf_token     = os.getenv("HF_TOKEN", "")
+        # Use env vars exactly as injected — do NOT modify API_BASE_URL
+        api_base_url = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+        api_key      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
         model        = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
-        # Ensure /v1 in path for OpenAI SDK routing
-        stripped = api_base_url.rstrip("/")
-        if not stripped.endswith("/v1"):
-            stripped = stripped + "/v1"
-        api_base_url = stripped
-
-        client = OpenAI(base_url=api_base_url, api_key=hf_token)
+        # Single client using the platform proxy — no URL modification
+        client = OpenAI(base_url=api_base_url, api_key=api_key)
 
         SYSTEM_PROMPT = (
             "You are an ICU charge coordinator at a 500-bed Indian hospital. "
