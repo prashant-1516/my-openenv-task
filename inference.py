@@ -163,21 +163,20 @@ def main():
     # Print ALL environment variables related to API so we can diagnose
     print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
     print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
-    print(f"[DEBUG] HF_TOKEN set={bool(HF_TOKEN)}", flush=True)
-    print(f"[DEBUG] API_KEY set={bool(os.getenv('API_KEY'))}", flush=True)
+    print(f"[DEBUG] API_KEY set={bool(API_KEY)}", flush=True)
     print(f"[DEBUG] All env keys with API: {[k for k in os.environ if 'API' in k.upper()]}", flush=True)
     print(f"[DEBUG] All env keys with TOKEN: {[k for k in os.environ if 'TOKEN' in k.upper()]}", flush=True)
     print(f"[DEBUG] All env keys with KEY: {[k for k in os.environ if 'KEY' in k.upper()]}", flush=True)
 
-    if not HF_TOKEN:
-        print("ERROR: HF_TOKEN not set", flush=True)
+    if not API_KEY:
+        print("ERROR: API_KEY not set", flush=True)
         sys.exit(1)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     print(f"[DEBUG] client created base_url={client.base_url}", flush=True)
 
     # Test ONE LLM call before running tasks
