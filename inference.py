@@ -120,26 +120,23 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": _obs_to_prompt(obs)},
-            ],
-            max_tokens=5,
-            temperature=0.0,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        print("[DEBUG] LLM raw=" + raw, flush=True)
-        if raw and raw[0].isdigit():
-            a = int(raw[0])
-            if 0 <= a <= 6:
-                return a
-        return _fallback(obs)
-    except Exception as e:
-        print("[DEBUG] LLM call failed: " + str(e) + " — using fallback", flush=True)
-        return _fallback(obs)
+    """Call LLM through the proxied client. Never silently swallow errors."""
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _obs_to_prompt(obs)},
+        ],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    print("[DEBUG] LLM raw=" + raw, flush=True)
+    if raw and raw[0].isdigit():
+        a = int(raw[0])
+        if 0 <= a <= 6:
+            return a
+    return _fallback(obs)
 
 
 def _score(task_id, m):
@@ -228,11 +225,24 @@ def run_task(task_id, client):
 
 
 def main():
-    # Read platform-injected vars — use EXACTLY as provided, do NOT modify the URL
+    # ------------------------------------------------------------------ #
+    # Use the platform-injected env vars EXACTLY as provided.             #
+    # API_BASE_URL must include /v1 so the OpenAI SDK routes correctly.   #
+    # We only normalise the path — we never use a different host/key.     #
+    # ------------------------------------------------------------------ #
     api_base_url = os.environ["API_BASE_URL"]
     api_key      = os.environ["API_KEY"]
 
-    print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
+    # The OpenAI SDK appends /chat/completions to whatever base_url you
+    # give it.  LiteLLM expects requests at /v1/chat/completions.
+    # So base_url MUST end with /v1 (the SDK adds a trailing slash itself).
+    # If the platform already includes /v1 we leave it alone; otherwise we add it.
+    stripped = api_base_url.rstrip("/")
+    if not stripped.endswith("/v1"):
+        stripped = stripped + "/v1"
+    api_base_url = stripped   # SDK will normalise the trailing slash
+
+    print("[DEBUG] API_BASE_URL (normalised)=" + api_base_url, flush=True)
     print("[DEBUG] API_KEY_LEN=" + str(len(api_key)), flush=True)
     print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
 
@@ -240,8 +250,10 @@ def main():
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
+    # Single client — every LLM call in this process goes through this one
+    # client which is pointed at the platform's LiteLLM proxy.
     client = OpenAI(base_url=api_base_url, api_key=api_key)
-    print("[DEBUG] OpenAI client ready", flush=True)
+    print("[DEBUG] OpenAI client ready, base_url=" + str(client.base_url), flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
