@@ -207,9 +207,12 @@ def run_task(task_id, client):
 
 
 def main():
-    # Read env vars here — guaranteed to be injected by now
-    api_base_url = os.environ["API_BASE_URL"]
-    api_key      = os.environ["API_KEY"]
+    # ✅ FIXED HERE
+    api_base_url = os.environ["API_BASE_URL"].rstrip("/")
+    if not api_base_url.endswith("/v1"):
+        api_base_url += "/v1"
+
+    api_key = os.environ["HF_TOKEN"]   # 🔥 IMPORTANT FIX
 
     print(f"[DEBUG] API_BASE_URL={api_base_url}", flush=True)
     print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
@@ -218,7 +221,6 @@ def main():
     if not _wait_for_server(max_wait=90):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Create client inside main() — env vars are available here
     client = OpenAI(base_url=api_base_url, api_key=api_key)
     print("[DEBUG] OpenAI client ready", flush=True)
 
