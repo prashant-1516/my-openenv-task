@@ -23,14 +23,15 @@ def _strict(score: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# LLM agent — uses platform-injected API_BASE_URL and API_KEY
+# LLM agent — routes through the platform's LiteLLM proxy
 # ---------------------------------------------------------------------------
 
 def _make_llm_agent():
     """
-    Build an OpenAI-compatible agent that routes through the platform's
-    LiteLLM proxy.  Uses API_BASE_URL and API_KEY exactly as injected —
-    no URL manipulation.
+    Build an agent that calls the platform's LiteLLM proxy.
+    base_url is normalised to include /v1 so the OpenAI SDK sends requests
+    to /v1/chat/completions (what LiteLLM expects).
+    Falls back to rule-based if env vars are missing.
     """
     try:
         from openai import OpenAI
@@ -39,7 +40,12 @@ def _make_llm_agent():
         api_key      = os.environ["API_KEY"]
         model        = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
-        # Use base_url exactly as provided — do NOT append /v1
+        # Normalise: ensure /v1 is present so SDK calls /v1/chat/completions
+        stripped = api_base_url.rstrip("/")
+        if not stripped.endswith("/v1"):
+            stripped = stripped + "/v1"
+        api_base_url = stripped
+
         client = OpenAI(base_url=api_base_url, api_key=api_key)
 
         SYSTEM_PROMPT = (
@@ -106,6 +112,10 @@ def _make_llm_agent():
         return _make_rule_based_agent()
 
 
+# ---------------------------------------------------------------------------
+# Episode runner
+# ---------------------------------------------------------------------------
+
 def _run_episode(agent_fn, seed: int = 42) -> dict:
     """Run a full episode and collect all outcome metrics."""
     env = ICUEnv(seed=seed)
@@ -147,15 +157,14 @@ def _run_episode(agent_fn, seed: int = 42) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Task 1 — EASY
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def grade_task_easy(agent_fn=None, seed: int = 42) -> float:
     """
     Score strictly in (0, 1).
     Higher score for: zero deaths AND low nurse-ratio breach fraction.
-    Uses linear scaling to guarantee strict (0, 1) exclusivity.
     """
     if agent_fn is None:
         agent_fn = _make_llm_agent()
@@ -165,14 +174,13 @@ def grade_task_easy(agent_fn=None, seed: int = 42) -> float:
     ratio_score   = 1.0 - m["ratio_breach_fraction"]
 
     raw    = 0.60 * (1.0 - death_penalty) + 0.40 * ratio_score
-    # Map [0,1] -> (0.04, 0.96) so perfect and worst scores are never 0 or 1
     scaled = raw * 0.92 + 0.04
     return _strict(scaled)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Task 2 — MEDIUM
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def grade_task_medium(agent_fn=None, seed: int = 42) -> float:
     """
@@ -192,9 +200,9 @@ def grade_task_medium(agent_fn=None, seed: int = 42) -> float:
     return _strict(scaled)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Task 3 — HARD
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def grade_task_hard(agent_fn=None, seed: int = 42) -> float:
     """
@@ -221,9 +229,9 @@ def grade_task_hard(agent_fn=None, seed: int = 42) -> float:
     return _strict(scaled)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Baseline agents for validation
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _make_random_agent(seed: int = 7):
     import random
@@ -254,9 +262,9 @@ def _make_rule_based_agent():
     return agent
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Entry point for hackathon validator
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("=" * 65)
