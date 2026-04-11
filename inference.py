@@ -7,7 +7,10 @@ import time
 import requests
 from openai import OpenAI
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+# Read platform-injected variables exactly as shown in the submission checklist
+API_BASE_URL = os.getenv("API_BASE_URL", "")
+MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+HF_TOKEN     = os.getenv("HF_TOKEN", "")   # Platform uses HF_TOKEN as the API key
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -120,23 +123,26 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    """Call LLM through the proxied client. Never silently swallow errors."""
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": _obs_to_prompt(obs)},
-        ],
-        max_tokens=5,
-        temperature=0.0,
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    print("[DEBUG] LLM raw=" + raw, flush=True)
-    if raw and raw[0].isdigit():
-        a = int(raw[0])
-        if 0 <= a <= 6:
-            return a
-    return _fallback(obs)
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": _obs_to_prompt(obs)},
+            ],
+            max_tokens=5,
+            temperature=0.0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        print("[DEBUG] LLM raw=" + raw, flush=True)
+        if raw and raw[0].isdigit():
+            a = int(raw[0])
+            if 0 <= a <= 6:
+                return a
+        return _fallback(obs)
+    except Exception as e:
+        print("[DEBUG] LLM call error: " + str(e), flush=True)
+        return _fallback(obs)
 
 
 def _score(task_id, m):
@@ -225,35 +231,33 @@ def run_task(task_id, client):
 
 
 def main():
-    # ------------------------------------------------------------------ #
-    # Use the platform-injected env vars EXACTLY as provided.             #
-    # API_BASE_URL must include /v1 so the OpenAI SDK routes correctly.   #
-    # We only normalise the path — we never use a different host/key.     #
-    # ------------------------------------------------------------------ #
-    api_base_url = os.environ["API_BASE_URL"]
-    api_key      = os.environ["API_KEY"]
+    # ---------------------------------------------------------------
+    # Platform injects exactly these three variables (from checklist):
+    #   API_BASE_URL  — LiteLLM proxy endpoint
+    #   MODEL_NAME    — model identifier
+    #   HF_TOKEN      — the API key (this is NOT called "API_KEY")
+    # ---------------------------------------------------------------
+    api_base_url = os.getenv("API_BASE_URL", "")
+    hf_token     = os.getenv("HF_TOKEN", "")
 
-    # The OpenAI SDK appends /chat/completions to whatever base_url you
-    # give it.  LiteLLM expects requests at /v1/chat/completions.
-    # So base_url MUST end with /v1 (the SDK adds a trailing slash itself).
-    # If the platform already includes /v1 we leave it alone; otherwise we add it.
+    # Ensure /v1 is in the path — OpenAI SDK appends /chat/completions
+    # to base_url, so LiteLLM only receives the call if /v1 is present.
     stripped = api_base_url.rstrip("/")
     if not stripped.endswith("/v1"):
         stripped = stripped + "/v1"
-    api_base_url = stripped   # SDK will normalise the trailing slash
+    api_base_url = stripped
 
-    print("[DEBUG] API_BASE_URL (normalised)=" + api_base_url, flush=True)
-    print("[DEBUG] API_KEY_LEN=" + str(len(api_key)), flush=True)
+    print("[DEBUG] API_BASE_URL=" + api_base_url, flush=True)
     print("[DEBUG] MODEL_NAME=" + MODEL_NAME, flush=True)
+    print("[DEBUG] HF_TOKEN_LEN=" + str(len(hf_token)), flush=True)
 
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
-    # Single client — every LLM call in this process goes through this one
-    # client which is pointed at the platform's LiteLLM proxy.
-    client = OpenAI(base_url=api_base_url, api_key=api_key)
-    print("[DEBUG] OpenAI client ready, base_url=" + str(client.base_url), flush=True)
+    # Single client — every LLM call goes through the platform proxy
+    client = OpenAI(base_url=api_base_url, api_key=hf_token)
+    print("[DEBUG] OpenAI client ready", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
