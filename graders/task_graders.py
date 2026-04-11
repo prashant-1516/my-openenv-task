@@ -20,21 +20,21 @@ def _strict(score: float) -> float:
 def _make_llm_agent():
     """
     Build an LLM agent using the platform's proxy.
-    Uses API_BASE_URL and HF_TOKEN exactly as provided — no URL modification.
+    Uses API_KEY (the proxy-tracked credential) with API_BASE_URL exactly as provided.
+    Falls back to HF_TOKEN if API_KEY is not set.
     """
     try:
         from openai import OpenAI
 
-        # Use exactly as the platform provides — same pattern as friend's working code
         api_base_url = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-        hf_token     = os.getenv("HF_TOKEN")
+        api_key      = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
         model        = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
-        if not hf_token:
-            print("[GRADER] HF_TOKEN not set, falling back to rule-based agent", flush=True)
+        if not api_key:
+            print("[GRADER] No API_KEY or HF_TOKEN found, using rule-based agent", flush=True)
             return _make_rule_based_agent()
 
-        client = OpenAI(base_url=api_base_url, api_key=hf_token)
+        client = OpenAI(base_url=api_base_url, api_key=api_key)
 
         SYSTEM_PROMPT = (
             "You are an ICU charge coordinator at a 500-bed Indian hospital. "
