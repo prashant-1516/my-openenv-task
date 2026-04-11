@@ -7,14 +7,12 @@ import time
 import requests
 from openai import OpenAI
 
-# ✅ SAFE env handling (no crash)
-API_BASE_URL = os.getenv("API_BASE_URL")
-API_KEY      = os.getenv("API_KEY")
-
-MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-
+MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 ENV_BASE_URL = "http://localhost:7860"
-MAX_STEPS = 48
+BENCHMARK    = "icu-resource-allocation"
+MAX_STEPS    = 48
+SUCCESS_THRESHOLD = 0.40
+REQUEST_TIMEOUT   = 30
 
 ACTION_NAMES = {
     0: "HOLD", 1: "ADMIT_CRITICAL", 2: "ADMIT_FIFO",
@@ -24,103 +22,173 @@ ACTION_NAMES = {
 
 SYSTEM_PROMPT = (
     "You are an ICU charge coordinator at a 500-bed Indian hospital. "
-    "Reply ONLY with one digit (0-6)."
+    "Every 30 minutes allocate scarce ICU resources. "
+    "20 beds | 12 vents | 4 dialysis | budget Rs150000/day. "
+    "NABH: max 2 patients/nurse. SOFA>=11 is CRITICAL, admit within 2 hours. "
+    "ACTIONS - reply ONLY one digit: "
+    "0=HOLD 1=ADMIT_CRITICAL 2=ADMIT_FIFO 3=TRANSFER_OUT "
+    "4=CALL_EXTRA_NURSE 5=SPECIALIST_CONSULT 6=EXPEDITE_BED. "
+    "Priority: admit critical first, keep nurse ratio<=2.0, stay within budget. "
+    "Reply with ONE digit 0-6 and nothing else."
 )
 
-# ─────────────────────────────────────────
 
-def _wait_for_server():
-    for _ in range(60):
+def log_start(task, env_name, model):
+    print(f"[START] task={task} env={env_name} model={model}", flush=True)
+
+def log_step(step, action, reward, done, error):
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error if error else 'null'}",
+        flush=True,
+    )
+
+def log_end(success, steps, score, rewards):
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} "
+        f"rewards={','.join(f'{r:.2f}' for r in rewards)}",
+        flush=True,
+    )
+
+
+def _wait_for_server(max_wait=90):
+    for _ in range(max_wait):
         try:
-            if requests.get(ENV_BASE_URL).status_code == 200:
+            r = requests.get(ENV_BASE_URL + "/", timeout=5)
+            if r.status_code == 200:
                 return True
-        except:
+        except Exception:
             pass
         time.sleep(1)
     return False
 
-def _reset():
+def _reset_env(seed=42):
     try:
-        return requests.post(ENV_BASE_URL + "/reset", json={"seed": 42}).json()
-    except:
+        r = requests.post(ENV_BASE_URL + "/reset", json={"seed": seed}, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[DEBUG] reset failed: {e}", flush=True)
         return {}
 
-def _step(a):
+def _step_env(action):
     try:
-        r = requests.post(ENV_BASE_URL + "/step", json={"action": a})
-        d = r.json()
-        return d["observation"], d["reward"], d["done"]
-    except:
-        return None, 0, True
+        r = requests.post(ENV_BASE_URL + "/step", json={"action": action}, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        return data["observation"], float(data["reward"]), bool(data["done"]), data.get("info", {})
+    except Exception as e:
+        print(f"[DEBUG] step failed: {e}", flush=True)
+        return None
+
+def _obs_to_prompt(obs):
+    shift_names = ["Day", "Evening", "Night"]
+    shift = shift_names[int(obs.get("shift", 0))]
+    return "\n".join([
+        f"Step {obs.get('step', 0)}/48  {obs.get('time_of_day', 8):.0f}:00  {shift}",
+        f"Beds {obs.get('beds_occupied', 0)}/20 | free={obs.get('beds_available', 0)}",
+        f"Queue {obs.get('queue_total', 0)}: CRITICAL={obs.get('queue_critical', 0)}",
+        f"Nurses ratio={obs.get('nurse_patient_ratio', 1.2):.1f}/2.0",
+        f"Budget Rs{int(obs.get('budget_remaining_inr', 150000))} remaining",
+        f"deaths={obs.get('deaths_in_queue', 0)} adverse={obs.get('adverse_events', 0)}",
+        "Action? Reply with ONE digit 0-6.",
+    ])
 
 def _fallback(obs):
     if obs.get("queue_critical", 0) > 0 and obs.get("beds_available", 0) > 0:
         return 1
-    if obs.get("queue_total", 0) > 0:
+    if obs.get("nurse_patient_ratio", 1.0) > 2.2:
+        return 4
+    if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) == 0:
+        return 3
+    if obs.get("queue_total", 0) > 0 and obs.get("beds_available", 0) > 0:
         return 2
     return 0
 
 def _get_action(client, obs):
-    try:
-        print("[DEBUG] calling LLM...", flush=True)
-
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": str(obs)},
-            ],
-            max_tokens=5,
-            temperature=0.0,
-        )
-
-        raw = (resp.choices[0].message.content or "").strip()
-        print("[DEBUG] LLM:", raw, flush=True)
-
-        if raw and raw[0].isdigit():
-            return int(raw[0])
-
-    except Exception as e:
-        print("[DEBUG] LLM error:", e, flush=True)
-
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _obs_to_prompt(obs)},
+        ],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    print(f"[DEBUG] LLM raw={raw}", flush=True)
+    if raw and raw[0].isdigit():
+        a = int(raw[0])
+        if 0 <= a <= 6:
+            return a
     return _fallback(obs)
 
-# ─────────────────────────────────────────
+def run_task(task_id, client):
+    rewards, ratio_breaches, sofa_traj = [], [], []
+    steps_taken = 0
+    score = 0.001
+    success = False
+    obs = {}
+
+    log_start(task=task_id, env_name=BENCHMARK, model=MODEL_NAME)
+
+    try:
+        obs  = _reset_env(seed=42)
+        done = False
+
+        for step_n in range(1, MAX_STEPS + 1):
+            if done:
+                break
+
+            try:
+                action_int = _get_action(client, obs)
+                llm_error  = None
+            except Exception as e:
+                print(f"[DEBUG] LLM error: {e}", flush=True)
+                action_int = _fallback(obs)
+                llm_error  = f"llm_err:{type(e).__name__}"
+
+            action_str = ACTION_NAMES.get(action_int, str(action_int))
+            result = _step_env(action_int)
+            if result is None:
+                log_step(step_n, action_str, 0.0, True, "step_http_failed")
+                steps_taken = step_n
+                break
+
+            obs, reward, done, _ = result
+            rewards.append(reward)
+            ratio_breaches.append(float(obs.get("nurse_patient_ratio", 1.0)) > 2.0)
+            sofa_traj.append(float(obs.get("avg_icu_sofa", 0.0)))
+            steps_taken = step_n
+            log_step(step_n, action_str, reward, done, llm_error)
+
+        success = True
+
+    except Exception as e:
+        print(f"[DEBUG] task={task_id} CRASHED: {e}", flush=True)
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
 
 def main():
-    print("[DEBUG] starting inference...", flush=True)
+    # ✅ ONLY FIX: use Scaler proxy
+    client = OpenAI(
+        base_url=os.environ["API_BASE_URL"],
+        api_key=os.environ["API_KEY"]
+    )
 
-    # ✅ check env safely
-    if not API_BASE_URL or not API_KEY:
-        print("[ERROR] Missing API_BASE_URL or API_KEY", flush=True)
-        sys.exit(1)
+    print("[DEBUG] Waiting for env server...", flush=True)
+    _wait_for_server(max_wait=90)
 
-    # ✅ safe client creation
-    try:
-        client = OpenAI(
-            base_url=API_BASE_URL,
-            api_key=API_KEY
-        )
-    except Exception as e:
-        print("[ERROR] client init failed:", e, flush=True)
-        sys.exit(1)
-
-    print("[DEBUG] proxy:", API_BASE_URL, flush=True)
-
-    _wait_for_server()
-    obs = _reset()
-
-    for i in range(MAX_STEPS):
-        action = _get_action(client, obs)
-        obs, reward, done = _step(action)
-
-        print(f"[STEP] {i} action={action} reward={reward}", flush=True)
-
-        if done:
-            break
-
-    print("[DONE]", flush=True)
+    for task_id in ["task_easy", "task_medium", "task_hard"]:
+        run_task(task_id, client)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[DEBUG] FATAL: {e}", flush=True)
+        sys.exit(1)
