@@ -1,8 +1,6 @@
 """
 Graders for ICU Resource Allocation OpenEnv.
 Each grader runs a full 48-step episode and returns a score in (0.0, 1.0) EXCLUSIVE.
-
-IMPORTANT: scores must be STRICTLY between 0 and 1 — not 0.0, not 1.0.
 """
 
 import sys
@@ -10,7 +8,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from env import ICUEnv
-
 
 _SCORE_MIN = 0.001
 _SCORE_MAX = 0.999
@@ -20,22 +17,24 @@ def _strict(score: float) -> float:
     return round(min(_SCORE_MAX, max(_SCORE_MIN, float(score))), 4)
 
 
-# ---------------------------------------------------------------------------
-# LLM agent — uses platform-injected env vars
-# IMPORTANT: Use API_BASE_URL exactly as injected. Use API_KEY (not HF_TOKEN).
-# ---------------------------------------------------------------------------
-
 def _make_llm_agent():
+    """
+    Build an LLM agent using the platform's proxy.
+    Uses API_BASE_URL and HF_TOKEN exactly as provided — no URL modification.
+    """
     try:
         from openai import OpenAI
 
-        # Use env vars exactly as injected — do NOT modify API_BASE_URL
+        # Use exactly as the platform provides — same pattern as friend's working code
         api_base_url = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-        api_key      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+        hf_token     = os.getenv("HF_TOKEN")
         model        = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
 
-        # Single client using the platform proxy — no URL modification
-        client = OpenAI(base_url=api_base_url, api_key=api_key)
+        if not hf_token:
+            print("[GRADER] HF_TOKEN not set, falling back to rule-based agent", flush=True)
+            return _make_rule_based_agent()
+
+        client = OpenAI(base_url=api_base_url, api_key=hf_token)
 
         SYSTEM_PROMPT = (
             "You are an ICU charge coordinator at a 500-bed Indian hospital. "
@@ -100,10 +99,6 @@ def _make_llm_agent():
         return _make_rule_based_agent()
 
 
-# ---------------------------------------------------------------------------
-# Episode runner
-# ---------------------------------------------------------------------------
-
 def _run_episode(agent_fn, seed: int = 42) -> dict:
     env = ICUEnv(seed=seed)
     obs = env.reset()
@@ -134,10 +129,6 @@ def _run_episode(agent_fn, seed: int = 42) -> dict:
         "total_reward":          total_reward,
     }
 
-
-# ---------------------------------------------------------------------------
-# Graders
-# ---------------------------------------------------------------------------
 
 def grade_task_easy(agent_fn=None, seed: int = 42) -> float:
     if agent_fn is None:
@@ -177,10 +168,6 @@ def grade_task_hard(agent_fn=None, seed: int = 42) -> float:
     scaled = raw * 0.92 + 0.04
     return _strict(scaled)
 
-
-# ---------------------------------------------------------------------------
-# Baseline agents
-# ---------------------------------------------------------------------------
 
 def _make_random_agent(seed: int = 7):
     import random
