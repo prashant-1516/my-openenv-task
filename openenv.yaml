@@ -106,7 +106,7 @@ tasks:
 env_vars:
   API_BASE_URL: { description: "LLM API endpoint", required: true }
   MODEL_NAME:   { description: "Model identifier for inference", required: true }
-  HF_TOKEN:     { description: "HuggingFace API key", required: true }
+  API_KEY:      { description: "OpenAI-compatible API key", required: true }
 
 infra:
   runtime_limit_minutes: 20
