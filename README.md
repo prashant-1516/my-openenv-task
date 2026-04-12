@@ -2,7 +2,7 @@
 title: ICU Resource Allocation OpenEnv
 emoji: 🏥
 colorFrom: red
-colorTo: orange
+colorTo: Yellow
 sdk: docker
 pinned: false
 ---
