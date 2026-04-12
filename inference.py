@@ -7,9 +7,9 @@ import time
 import requests
 from openai import OpenAI
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.2-3B-Instruct")
-API_KEY      = os.getenv("API_KEY") 
+API_BASE_URL = os.getenv("API_BASE_URL")   # Must be set by evaluator — no fallback
+MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+API_KEY      = os.getenv("API_KEY")
 
 ENV_BASE_URL      = "http://localhost:7860"
 BENCHMARK         = "icu-resource-allocation"
@@ -84,22 +84,24 @@ def _fallback(obs):
     return 0
 
 def _get_action(client, obs):
-    # NO try/except — let failures be visible in logs
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": _obs_to_prompt(obs)},
-        ],
-        max_tokens=5,
-        temperature=0.0,
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    print(f"[DEBUG] LLM raw={raw!r}", flush=True)
-    if raw and raw[0].isdigit():
-        a = int(raw[0])
-        if 0 <= a <= 6:
-            return a
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": _obs_to_prompt(obs)},
+            ],
+            max_tokens=5,
+            temperature=0.0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        print(f"[DEBUG] LLM raw={raw!r}", flush=True)
+        if raw and raw[0].isdigit():
+            a = int(raw[0])
+            if 0 <= a <= 6:
+                return a
+    except Exception as e:
+        print(f"[DEBUG] LLM call failed: {e} — using fallback", flush=True)
     return _fallback(obs)
 
 def _score(task_id, m):
@@ -172,21 +174,16 @@ def main():
         print("ERROR: API_KEY not set", flush=True)
         sys.exit(1)
 
+    if not API_BASE_URL:
+        print("ERROR: API_BASE_URL not set — cannot proceed without the LiteLLM proxy URL", flush=True)
+        sys.exit(1)
+
     print("[DEBUG] Waiting for env server...", flush=True)
     if not _wait_for_server(max_wait=60):
         print("[DEBUG] Server not ready, continuing anyway", flush=True)
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     print(f"[DEBUG] client created base_url={client.base_url}", flush=True)
-
-    # Test ONE LLM call before running tasks
-    print("[DEBUG] Testing LLM call...", flush=True)
-    test_resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "Reply with digit 1 only."}],
-        max_tokens=5,
-    )
-    print(f"[DEBUG] LLM test response: {test_resp.choices[0].message.content!r}", flush=True)
 
     for task_id in ["task_easy", "task_medium", "task_hard"]:
         run_task(task_id, client)
