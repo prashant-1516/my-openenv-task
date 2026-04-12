@@ -24,20 +24,12 @@ def _make_rule_based_agent():
     """Fallback agent — makes a required API call to satisfy the LLM Proxy tracker."""
     import os
     from openai import OpenAI
-    
+
     # The platform explicitly checks for os.environ variables
-    try:
-        api_base_url = os.environ["API_BASE_URL"]
-    except KeyError:
-        api_base_url = "https://router.huggingface.co/v1"
-        
-    try:
-        api_key = os.environ["API_KEY"]
-    except KeyError:
-        api_key = ""
-        
+    api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    api_key = os.environ.get("API_KEY", "")
     model_name = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-    
+
     client = None
     if api_key:
         try:
@@ -56,7 +48,7 @@ def _make_rule_based_agent():
                 )
             except Exception:
                 pass
-                
+
         # 2. Return the rule-based logic natively
         if obs["queue_critical"] > 0 and obs["beds_available"] > 0:
             return 1
@@ -67,9 +59,8 @@ def _make_rule_based_agent():
         if obs["queue_total"] > 0 and obs["beds_available"] > 0:
             return 2
         return 0
-        
-    return agent
 
+    return agent
 
 
 def _run_episode(agent_fn, seed: int = 42) -> dict:
